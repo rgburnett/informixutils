@@ -1,0 +1,403 @@
+#!/bin/sh
+
+: '{{ TOOLDOC 1
+/*
+ * NAME 	: idbverify - verify digital signature on a database schema 
+ *
+ * USAGE	: idbverify [ -s ] [ -g ] [ database list ]
+ *
+ * ARGUMENTS	: -g	with grants, extents and fragmentation
+ *		  -s	sign off a database schema
+ *
+ * DESCRIPTION	: idbverify will check a fully built database schema and 
+ *		  report the current version number and current patch level.
+ *		  
+ *		  The -s option allows a suitably priviliged user to signs 
+ *		  off a database and stores its digital signature in the 
+ *		  signature file.
+ *
+ *		  idbverify used the Informix command dbschema to extract 
+ *		  the schema. With the -g flag, the -ss arguement is passed 
+ *		  to dbschema. This allows idbverify to work in two modes:
+ *
+ *		  Non-site specific mode
+ *		  ======================
+ *
+ *		  This will be the most common way idbverify is used and will 
+ *		  result in a signature devoid of site specific information. 
+ *		  The following IS checked in this mode:
+ *
+ *		  - Create table statments (column definitions, check 
+ *		    constraints etc) 
+ *		  - Create Index statements
+ *		  - Referential integrity constraints
+ *		  - Triggers
+ *		  - Procedures
+ *		  - Table/Procedure/Trigger grants.
+ *
+ *		  Site specific mode
+ *                ==================
+ *
+ *		  The -g option allows for the inclusion of site specific 
+ *		  Informix configuration and will include all the elements 
+ *		  which make up a schema. This list includes:
+ *		
+ *		  - The version of the Informix software.
+ *		  - Table placement policy
+ *		  - Index placement policy
+ *		  - extent sizing information
+ *		  - Fragmentation policy and fragment grants.
+ *
+ *		  Digital Signatures
+ *                ==================
+ *
+ *		  Known digital signatures, together with a description of 
+ *		  the release are stored in a file pointed to by the 
+ *		  $IVERSIGFILE. This file is signed to deter tampering.
+ *		  
+ *		  It is difficult to generate a bogus digital signature but 
+ *		  not beyond the bounds of possibility if the forger is 
+ *		  determined enough.
+ *
+ * NOTES	: Only people with the access to the DigitalSignature file are 
+ *		  allowed to sign off databases.
+ *
+ *		  It is anticipated that this will be any member of the group 
+ *		  informix.
+ *
+ *		  This program uses the md5 (rfc1321) message digest function 
+ *		  which is a one way cryptographic hash function. This 
+ *		  produces a unique signature for the file/schema. If you are 
+ *		  interested in the mechanics of md5, consult the internet 
+ *		  rfc1321.
+ *		  
+ * EXTERNAL 
+ * INTERFACES	: Uses the signature file pointed to by IVERSIGFILE 
+ *
+ *		  Signature File Format
+ *		  =====================
+ *
+ *		  This file is itself signed. Please refer to idsig for detail 
+ *		  on the on digital signatures.
+ *
+ *		  The file consists of lines containing 7 pipe (|) delimited 
+ *		  values:
+ *
+ *		  Field 1: 20 digit hex number - this is the output from md5
+ *
+ *		  Field 2: Database name.
+ *
+ *		  Field 3: Database version.
+ *
+ *		  Field 4: Date 
+ *
+ *		  Field 5: Database owner 
+ *
+ *		  Field 6: Database tester 
+ *
+ *		  Field 7: Description
+ *
+ * PERMS	: 555
+ *
+ * STATUS	: INTERNAL DB TEAM USE ONLY 
+ *
+ * OWNER	: Graeme Burnett
+ *
+ * SEE ALSO	: idsig, ichksig, md5, CheckEnv
+ *
+ * SCCS ID	: @(#)idbverify	1.9 
+ */
+'
+
+: '
+/*
+ * NAME 	: CheckObjectExists - check whether object type exists
+ *
+ * USAGE	: CheckObjectExists <class> <database> <objectname>
+ *
+ * ARGUMENTS	: <class> - [ db | idx | tab | con | trg ] 
+ *
+ *		  <database> - the name of the database
+ *
+ *		  <objectname> - the name of the thing you are looking for
+ *
+ * DESCRIPTION	: CheckObjectExists provides an easy mechanism for testing whether a database object
+ *	          exists in the specified database. 
+ *
+ * NOTES	: Only works properly for a non Ansi database because the assumption is 
+ *                that 1 or 0 is the result of the query.  Returns 0 success, 1 failure.
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+
+CheckObjectExists()
+{
+    case $1 in
+    db)
+	_CTDBNAME=sysmaster
+	_CTNAME=name
+	_CTCLASS=sysdatabases
+	;;
+    idx)
+	_CTDBNAME=$2
+	_CTNAME=idxname
+	_CTCLASS=sysindexes
+	;;
+    tab)
+	_CTDBNAME=$2
+	_CTNAME=tabname
+	_CTCLASS=systables
+	;;
+    con)
+	_CTDBNAME=$2
+	_CTNAME=constrname
+	_CTCLASS=sysconstraints
+	;;
+    trg)
+	_CTDBNAME=$2
+	_CTNAME=trigname
+	_CTCLASS=systriggers
+	;;
+    *)
+	/bin/echo "CheckObjectExists: Unknown type of object [ $* ]"
+	ReturnToContinue
+	return 1
+    esac
+
+    ( 
+	/bin/echo "SELECT count(*) FROM ${_CTCLASS} WHERE ${_CTNAME} = '\c"; 
+	/bin/echo "$3'" 
+    ) | $INFORMIXDIR/bin/dbaccess "${_CTDBNAME}" 2> /dev/null | sed   -e '/^$/d' \
+						-e '/count/d' \
+						-e 's/  *//' | grep  1 > /dev/null
+
+    [ $? -eq 0 ] && return 0 || return 1
+}
+
+: '
+/*
+ * NAME 	: GetString - read from stdin and place the input in an environment variable 
+ *
+ * USAGE	: GetString <environment variable> <user friendly message>
+ *
+ * ARGUMENTS	: <environment variable>  - the name of an enviroment variable that the user response
+ *					    is placed in.
+ * 		  
+ *		  <user friendly message> - obvious
+ *
+ * DESCRIPTION	: GetString prompts the user with a message an reads a response into a shell variable.
+ *
+ * NOTES	: one of the only uses of eval I have ever used. 
+ *
+ * SEE ALSO	: read(1), eval(1) sh(1).
+ *
+ */
+'
+
+GetString()
+{
+    /bin/echo "$2 : \c"
+
+    #
+    # Unusual name used to help avoid overwriting any previously defined shell variable
+    #
+    read _d_u_m_m_y
+
+    #
+    # The user response is quoted in case it contains spaces
+    #
+    eval $1="\"$_d_u_m_m_y\""
+
+    export "$1"
+}
+
+: '
+/*
+ * NAME 	: CheckEnv  - check that you have all the components available to run this program
+ *
+ * USAGE	: Checkenv
+ *
+ * ARGUMENTS	: none 
+ * 		  
+ * DESCRIPTION	: CheckEnv is used to make sure that all the programs necessary to run this
+ *		  script are present. This helps ensure that there will be a minmum of run time
+ *		  errors.
+ *
+ * NOTES	: 
+ *
+ * FUNCTIONS	: Functions called
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+
+CheckEnv()
+{
+    _CECHECKLIST="ichksig idsig md5 $INFORMIXDIR/bin/dbaccess /bin/basename" 
+
+    #
+    # Use which to find out if all the required executables are available.
+    #
+
+    if [ ! -f /bin/which ]
+    then
+	/bin/echo "$IVERPROG: Cannot run because I am unable to check whether the required binaries exist"
+	/bin/echo "The binary /bin/which does not exist or is unreadable"
+	exit 1
+    fi
+
+    for _CEITEM in $_CECHECKLIST
+    do
+	_CEFILE="`/bin/which $_CEITEM`"
+
+	if [ $? -eq 0 -a -f "$_CEFILE" -a -x "$_CEFILE" ]
+	then
+	    :
+	else
+	    /bin/echo "$IVERPROG: Problem finding or executing $_CEFILE. Please check" 1>&2
+	    exit 1
+	fi
+    done
+}
+
+#
+# First thing is to make sure that the environment is suitable for us to run
+#
+
+CheckEnv
+
+#
+# Now we know that the required binaries are present, lets run a check on ourselves to
+# make sure that we are ok.
+#
+
+if ichksig $0 > /dev/null
+then
+    :
+else
+    /bin/echo "$IVERPROG: The digital signature on this file is corrupt."
+    exit 1
+fi
+
+IVERSIGFILE=${IVERSIGFILE:-/usr/informix/dbtools/DigitalSignatures}
+IVERPROG="`/bin/basename $0`"
+USAGE="${IVERPROG}: [[-s] [-g] database [database]]"
+
+if [ ! -f $IVERSIGFILE ] 
+then
+    /bin/echo "$IVERPROG: Cannot open the Signature file [$IVERSIGFILE]"
+    exit 1
+elif ichksig $IVERSIGFILE > /dev/null
+then
+    :
+else
+    /bin/echo "$IVERPROG: The signature file $IVERSIGFILE has a bad signature" 
+    exit 1
+fi
+
+IVERSIGN=false
+IVERGRANT=false
+IVERMESG="Checking"
+
+for IVERDB in $*
+do
+    case "$IVERDB" in
+    -g)
+	IVERGRANT=true
+	shift
+	continue
+	;;
+
+    -s)
+	IVERMESG="Signing"
+	IVERSIGN=true
+
+	if [ ! -w "$IVERSIGFILE" ]
+	then
+	    /bin/echo "You do not have permission to sign files on $IVERSIGFILE"
+	    exit 1
+	fi
+
+	shift
+	continue
+	;;
+    *)
+    esac
+
+    if CheckObjectExists db $IVERDB $IVERDB
+    then
+	:
+    else
+	/bin/echo "Skipping $IVERDB - non existant database"
+	continue
+    fi
+
+    /bin/echo "Please be patient. dbschema takes around 5 - 10 minutes to produce output"
+
+    if $IVERGRANT
+    then
+	/bin/echo "$IVERMESG ${IVERDB} with user GRANTS and SYSTEM SPECIFICS"
+
+	IVERTARGETSIG="`$INFORMIXDIR/bin/dbschema -d ${IVERDB} -ss | \
+	    #
+	    #  The following sed script gets rid of the software version number to 
+	    # produce a site independent schema
+	    # 
+	    sed -e '1,/^Software/d' | md5`"
+    else
+	/bin/echo "$IVERMESG ${IVERDB} without user GRANTS, EXTENTS and FRAGMENTS"
+
+	IVERTARGETSIG="`dbschema -d ${IVERDB} | \
+	    sed -e '1,/^Software/d' \
+		-e '/^grant /d' | md5`"
+    fi
+
+    if $IVERSIGN
+    then
+
+	GetString IVERREL "Enter Release Level" 
+	GetString IVEROWNER "Who owns $IVERDB" 
+	GetString IVERTESTER "Who Tested $IVERDB" 
+	GetString IVERDESC "Description"
+
+	chmod 644 $IVERSIGFILE
+	/bin/echo "$IVERTARGETSIG|$IVERDB|$IVERREL|`date`|$IVEROWNER|$IVERTESTER|$IVERDESC"  >> \
+	    $IVERSIGFILE
+	
+	#
+	# Resign the signature file.
+	#
+
+	idsig -r $IVERSIGFILE
+	continue
+    fi
+
+    IVERGOODSIG=`grep "^${IVERTARGETSIG}|" $IVERSIGFILE 2>/dev/null` 
+
+    if [ -z "$IVERGOODSIG" ]
+    then
+	/bin/echo "This database [ $IVERDB ] appears to be an unsupported release"
+
+	if $IVERGRANT
+	then
+	    :
+	else
+	    /bin/echo "try the 'no user grants' option"
+	    /bin/echo "$USAGE"
+	fi
+    else
+	/bin/echo "$IVERGOODSIG"  | awk -F'|' '{
+	    printf("Database [ %s ]\n", $2)
+	    printf("Version  [ %s ]\n", $3)
+	    printf("Dated    [ %s ]\n", $4)
+	    printf("Owner    [ %s ]\n", $5)
+	    printf("Tester   [ %s ]\n", $6)
+	    printf("Desc     [ %s ]\n", $7)
+	}'
+    fi
+done
+
+exit 0

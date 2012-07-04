@@ -1,0 +1,4 @@
+dbaccess $1 <<!
+select tabname from systables where tabid > 99;
+!
+) 2>/dev/null | sed -e '/tabname/d' -e '/^$/d' -e 's/  *//'

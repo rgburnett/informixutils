@@ -1,0 +1,193 @@
+#!/bin/sh
+
+: '{{ TOOLDOC 1
+/*
+ * Name 	: ipc - Informix print columns - print the columns of a table 
+ *
+ * Usage	: ipc database [ -c | -i | -s ] table 
+ *
+ * Arguements	: database	- the name of the database containing the table 
+ *
+ *		  -c		- create table statement
+ *		  -s		- a select statement
+ *		  -i 		- an insert statement
+ *
+ * Description	: ipc assists in the composition of preprocess sql files for use
+ *		  in the iimport tool.
+ *
+ * Notes	: Specifics 
+ *
+ * Perms	: 555
+ *
+ * Status	: SHAREWARE 
+ *
+ * See Also	: iimport(1DB), iexport(1DB) 
+ *
+ * Sccs Id	: %W% 
+ *
+ * Dated	: %D% %T% 
+ *
+ * Owner	: Graeme Burnett
+ *
+ * Continuus
+ * 
+ * Type		: %cvtype: %
+ * Created by	: %created_by: %
+ * Date Created	: %date_created: %
+ * Date Modified: %date_modified: %
+ * Derived by	: %derived_by: %
+ * File/Version	: %filespec: %
+ *
+ */
+'
+
+trap '/bin/rm -f $TMP1; exit 0' 0 1 2 3 15
+
+TMP1="/tmp/.imkppfile$$"
+
+
+Usage()
+{
+    (
+    cat <<!
+
+ipc database    tablename - Prints a list of colum names only
+
+             -c tablename - Prints column names and definitions for a create statement
+             -s tablename - Prints column names and definitions for a select statement
+             -i tablename - Prints column names and definitions for an insert statement
+!
+    ) 1>&2
+
+}
+
+
+createtable=false
+select=false
+insert=false
+
+I_DB=$1
+shift
+
+if [ "$1" = "-c" ]
+then
+
+    shift
+    createtable=true
+
+elif [ "$1" = "-s" ]
+then
+
+    shift
+    select=true
+
+elif [ "$1" = "-i" ]
+then
+
+    shift
+    insert=true
+fi
+
+if [ "$I_DB" = "" ]
+then
+    exec echo "I_DB not set" 1<&2
+fi
+
+
+if $createtable
+then
+
+    (
+	echo "CREATE TABLE"
+	echo "    $I_DB:$1"
+	echo "("
+	dbaccess $I_DB <<!
+	    info columns for $1
+!
+	echo ");"
+    ) 2</dev/null | sed	-e '/^$/d' 			\
+			-e 's/  *yes/,/' 		\
+			-e 's/  *no/ not null,/'	\
+			-e '/Column name/d' < $TMP1
+
+(
+    ex $TMP1  <<!
+$
+-
+:s/,$//
+w 
+q
+!
+) </dev/null 2<&1 
+
+elif $insert
+then
+
+    (
+	echo "INSERT INTO"
+	echo "	${I_DB}:${1}"
+	echo "("
+	dbaccess ${I_DB} <<!
+	    info columns for $1
+!
+	echo ");"
+    ) 2</dev/null | sed	-e '/^$/d' 		\
+			-e 's/  .*/,/' 		\
+			-e '/Column name/d' < $TMP1
+(
+    ex $TMP1  <<!
+$
+-
+:s/,$//
+w 
+q
+!
+) </dev/null 2<&1 
+
+elif $select
+then
+
+    (
+    echo "SELECT"
+    echo "("
+    dbaccess $I_DB <<!
+    info columns for $1
+!
+    echo ")"
+    ) 2</dev/null | sed	-e '/^$/d' 		\
+			-e 's/  .*/,/' 		\
+			-e '/Column name/d' < $TMP1
+
+(
+    ex $TMP1  <<!
+$
+-
+:s/,$//
+w 
+q
+!
+) </dev/null 2<&1 
+
+else
+    (
+    dbaccess $I_DB <<!
+    info columns for $1
+!
+    ) 2</dev/null | sed	-e '/^$/d' 		\
+			-e 's/  .*/,/' 		\
+			-e '/Column name/d' < $TMP1
+
+(
+    ex $TMP1  <<!
+$
+:s/,$//
+w 
+q
+!
+) </dev/null 2<&1 
+
+fi
+
+cat $TMP1
+
+exit 0

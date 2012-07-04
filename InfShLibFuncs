@@ -1,0 +1,826 @@
+#!/bin/sh
+
+: '
+/*
+ * NAME 	LibFuncs
+ *
+ * DESCRIPTION	Contains all the Library routines used in the menu scripts
+ *
+ * NOTES
+ *
+ * NAME 	: AskYN - Ask the user to enter y or n
+ * NAME 	: CheckObjectExists - check whether object type exists
+ * NAME 	: CreateDatabase - Create a database
+ * NAME 	: CreateObjects - Run all the "objects" for a database
+ * NAME 	: DropDatabase - drop a database
+ * NAME 	: Environment - sets up the users environment
+ * NAME 	: GetEnv - Read from the Screen and place the answer in to the environment 
+ * NAME 	: GetRangeValue - Read from the Screen and place the answer in to 
+ * NAME 	: ListDatabases - list all databases
+ * NAME 	: ListScripts - find all scripts of a certain type 
+ * NAME 	: MovePutStr - Move the Cursor and put a string
+ * NAME 	: NotWorking - When job has finished, the activity indicator process
+ * NAME 	: ReturnToContinue - Display Message "Press return to continue"
+ * NAME 	: RunSQLCommand - Run an sql command or command file
+ * NAME 	: Working - Display an activity whilst a process is running
+ *
+ * SEE ALSO
+ *
+ *
+ * PERMS	: 555
+ *
+ * SCCSID @(#)LibFuncs	1.7
+ */
+'
+
+: '
+/*
+ * NAME 	: Environment - sets up the users environment
+ *
+ * USAGE	: Called in your leading shell script
+ *
+ * ARGUMENTS	: None
+ *
+ * DESCRIPTION	:
+ *
+ * NOTES	:
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+
+Environment()
+{
+    B="`tput smso`" export B
+    O="`tput rmso`" export O
+    VERSION="57" export VERSION
+    RELEASE="1.0a" export RELEASE
+    I_DB="litsdb" export I_DB
+    LEVEL="GENERIC" export LEVEL
+    SITE="`hostname`" export SITE
+    RELEASEDIR="${RELEASEDIR:-/users/burnettg/Release1.0A}" export RELEASEDIR
+    DATABASE_RATIO="50"
+    INDEX_RATIO="50"
+    DATABASE_SPACES="" export DATABASE_SPACES
+    INDEX_SPACES="" export INDEX_SPACES
+    READONLY_RATIO="15"
+    BUILDORDER="db:tab:idx:ri:pro:trg" export BUILDORDER
+    LOGFILE="ibuild.log" export LOGFILE
+    TMP1="/tmp/.ibuild1.$$" export TMP1
+    TMP2="/tmp/.ibuild2.$$" export TMP2
+    TMP3="/tmp/.ibuild3.$$" export TMP3
+    TMP4="/tmp/.ibuild4.$$" export TMP4
+    TMP5="/tmp/.ibuild5.$$" export TMP5 # Only use this in here 
+}
+
+: '
+/*
+ * NAME 	: LogMesg - log a message to a file
+ *
+ * USAGE	: LogMesg <class> <message>
+ *
+ * ARGUMENTS	: <class> type of message (ERROR or othewise)
+ * 		  <message> - any textual message
+ *
+ * DESCRIPTION	: Logs a timestamped message to the file pointed to by LOGFILE
+ *                or to _LMLOGFILE (which is set to logmesg.log) if this is not 
+ *                set.
+ *
+ * NOTES	: This function implements a "spinning" procedure so that it
+ *		  does not endlessly gobble up disk space. If the file is 
+ *		  greater than 50000 bytes in size, it renames the log file to
+ *		  the same name plus a post fix of -1:
+ *
+ *		  e.g. ioncheck.log will become ioncheck.log-1
+ *
+ * EXTERNAL 
+ * INTERFACES	: This will write a log file in the current directory 
+ *                
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+
+LogMesg()
+{
+    _LMLOGFILE="${LOGFILE:-logmesg.log}"
+    _PROGNAME="${PROGNAME:-`basename $0`}"
+
+    [ "$1" = "ERROR" ] && _LMPREFIX="E_${_PROGNAME} " || _LMPREFIX="U_${_PROGNAME} "
+
+    shift
+
+    [ -f ${_LMLOGFILE} ] || touch ${_LMLOGFILE}
+    
+    SIZE="`ls -l ${_LMLOGFILE} | awk '{ print $5 }'`"
+
+    if [ "$SIZE" -gt 50000 ]
+    then
+	mv -f ${_LMLOGFILE} ${_LMLOGFILE}-1 && chmod 444 ${_LMLOGFILE}-1
+    fi
+
+    (
+	_LMDATE=`date +"%y-%m-%d %H:%M:%S"`
+	echo "${_LMPREFIX}[${_LMDATE}] $*"
+    ) | tee -a ${_LMLOGFILE}
+
+}
+
+: '
+/*
+ * NAME 	: Working - Display an activity whilst a process is running
+ *
+ * USAGE	: Working
+ *
+ * ARGUMENTS	: none
+ *
+ * DESCRIPTION	: Nifty shell script which runs in background displaying a cute
+ *		  activity indicator (pinched from sun) whilst a process is running
+ *
+ * NOTES	: Requires that the top level shell has its stderr redirected to 
+ *		  /dev/null - otherwise you get messages about kids being killed
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+
+Working()
+{
+    (
+	echo "Working....\c"
+	while :
+	do
+	    echo '\\\c'
+	    sleep 1
+	    echo '\b|\c'
+	    sleep 1
+	    echo '\b/\c'
+	    sleep 1
+	    echo '\b-\c'
+	    sleep 1
+	    echo '\b\\\c'
+	    sleep 1
+	    echo '\b|\c'
+	    sleep 1
+	    echo '\b/\c'
+	    sleep 1
+	    echo '\b-\c'
+	    sleep 1
+	    echo '\b\c'
+	done
+    )&
+    _WKILLPID="$!" export _WKILLPID
+}
+
+: '
+/*
+ * NAME 	: NotWorking - When job has finished, the activity indicator process
+ *
+ * USAGE	: NotWorking <pid>
+ *
+ * ARGUMENTS	: <pid> - The Process id of the background 
+ *
+ * DESCRIPTION	:
+ *
+ * NOTES	: 
+ *
+ * SEE ALSO	: Working
+ *
+ */
+'
+
+NotWorking()
+{
+    kill -9 $_WKILLPID 2>&1 >  /dev/null
+}
+
+: '
+/*
+ * NAME 	: MovePutStr - Move the Cursor and put a string
+ *
+ * USAGE	:
+ *
+ * ARGUMENTS
+ *
+ * DESCRIPTION	:
+ *
+ * NOTES	: couldnt get tput cup to work - so had to hard code it for the
+ *		  aix term - bloody ibm
+ *
+ * SEE ALSO	: tput cup
+ *
+ */
+'
+
+MovePutStr()
+{
+    echo "\033[${1};${2}H\c"
+    shift; shift
+    echo $*
+}
+
+: '
+/*
+ * NAME 	: CheckObjectExists - check whether object type exists
+ *
+ * USAGE	: CheckObjectExists <class> <database> <objectname>
+ *
+ * ARGUMENTS	: <class> - [ db | idx | tab | con | trg ] 
+ *
+ *		  <database> - the name of the database
+ *
+ *		  <objectname> - the name of the thing you are looking for
+ *
+ * DESCRIPTION	: similar to Checkdatabase stripping out all but the result of the count
+ *
+ * NOTES	: Only works properly for a non Ansi database because the assumption is 
+ *                that 1 or 0 is the result of the query.  Returns 0 success, 1 failure.
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+CheckObjectExists()
+{
+    case $1 in
+    db)
+	_CTDBNAME=$2
+	_CTNAME=name
+	_CTCLASS=sysdatabases
+	;;
+    idx)
+	_CTDBNAME=$2
+	_CTNAME=idxname
+	_CTCLASS=sysindexes
+	;;
+    tab)
+	_CTDBNAME=$2
+	_CTNAME=tabname
+	_CTCLASS=systables
+	;;
+    con)
+	_CTDBNAME=$2
+	_CTNAME=constrname
+	_CTCLASS=sysconstraints
+	;;
+    trg)
+	_CTDBNAME=$2
+	_CTNAME=trigname
+	_CTCLASS=systriggers
+	;;
+    *)
+	echo "CheckObject: Unknown type of object [ $* ]"
+	ReturnToContinue
+	return 1
+    esac
+
+    ( 
+	echo "SELECT count(*) FROM ${_CTCLASS} WHERE ${_CTNAME} = '\c"; 
+	echo "$3'" 
+    ) | dbaccess "${_CTDBNAME}" 2> /dev/null | sed   -e '/^$/d' \
+						-e '/count/d' \
+						-e 's/  *//' | grep  1 > /dev/null
+
+    [ $? -eq 0 ] && return 0 || return 1
+}
+
+: '
+/*
+ * NAME 	: AskYN - Ask the user to enter y or n
+ *
+ * USAGE	:puts a YN dialogue on the screen requiring user input
+ *
+ * ARGUMENTS    :	
+ *
+ * DESCRIPTION	:Loops until someone enters ynYN 
+ *
+ * NOTES	:returns 0 for yY and 1 for nN
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+
+AskYN()
+{
+    while :
+    do
+	echo "$*"
+
+	read _ANS
+
+	case $_ANS in
+	y|Y) return 0 ;;
+	n|N) return 1 ;;
+	*) continue;;
+	esac
+
+    done
+}
+
+: '
+/*
+ * NAME 	: ListDatabases - list all databases
+ *
+ * USAGE        : output is a cat of the file containing the database names in five 
+ *		  columns, sorted by name
+ *
+ * ARGUMENTS	: none
+ *
+ * DESCRIPTION	: 	
+ *
+ * NOTES        :	
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+ListDatabases()
+{
+    (
+    dbaccess sysmaster <<!
+    SELECT
+	name
+    FROM
+	sysdatabases
+!
+
+    ) 2>/dev/null | sed -e '/^$/d' -e '/^name/d' | sort | pr -r -5 -t -l20 > $TMP5
+
+    if [ -s $TMP5 ]
+    then
+	cat $TMP5
+	return 0
+    else
+	return 1
+    fi
+}
+
+: '
+/*
+ * NAME 	: DropDatabase - drop a database
+ *
+ * USAGE        : called when user asks to drop database 
+ *
+ * ARGUMENTS    : databasename
+ *
+ * DESCRIPTION	: Uses the AskYN Proc to give another chance and then deletes the 
+ *		  named database.
+ *
+ * NOTES        :	
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+DropDatabase()
+{
+    if CheckObjectExists db sysmaster $1
+    then
+	if AskYN "Are you sure you want to drop database $1 (n/Y)? \c"
+	then
+	    if RunSQLCommand sysmaster "DROP DATABASE $1"
+	    then
+		return 0
+	    fi
+	fi
+    else
+	echo "Database $1 does not exist"
+    fi
+    return 1
+}
+
+: '
+/*
+ * NAME 	: GetEnv - Read from the Screen and place the answer in to the environment 
+ *		           variable  passed
+ *
+ * USAGE	: Getenv <Environment Variable Name> "Message String"
+ *
+ * ARGUMENTS	: The name of the Environment Variable you want the value in and
+ *		  a user friendly message.
+ *
+ * DESCRIPTION	: Prompts for the value required for env variable param 1 with message 
+ *                param 2
+ * NOTES
+ *
+ * SEE ALSO
+ *
+ */
+'
+
+GetEnv()
+{
+    echo "$2"
+
+    read _d_u_m_m_y
+
+    eval $1=$_d_u_m_m_y
+
+    export $1
+}
+
+
+: '
+/*
+ * NAME 	: ReturnToContinue - Display Message "Press return to continue"
+ *
+ * USAGE	: ReturnToContinue 
+ *
+ * ARGUMENTS	: none
+ *
+ * DESCRIPTION	: Prints user friendly message and awaits return
+ *
+ * NOTES	:
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+
+ReturnToContinue()
+{
+    echo "Press Return to continue \c"
+    read d_d_d
+}
+
+
+: '
+/*
+ * NAME 	: RunSQLCommand - Run an sql command or command file
+ *
+ * USAGE	: RunSQLCommand <database> [ "Command" | -f <scriptfile> ] 
+ *
+ * ARGUMENTS	: <database> - the name of the database to run against
+ *
+ *		  "Command" 
+ *		  OR
+ *                -f <scriptfile>
+ *
+ * DESCRIPTION	: RunSQLCommand will run the statment or the script file and
+ *		  detect any errors showing you why the command didnt work
+ *
+ * NOTES	:
+ *
+ * RETURNS	: 0 for success 1 for failure
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+
+RunSQLCommand()
+{
+    if [ $# -lt 2 ]
+    then
+	/bin/echo "RunSQLCommand: Incorrect argument count: $*" 1>&2
+	return 1
+    fi
+
+    if [ "$2" = "-f" ]
+    then
+	if [ ! -f "$3" ]
+	then
+	    /bin/echo "$0: Cannot open file [$3]"
+	    ReturnToContinue
+	    return 1
+	fi
+
+	$INFORMIXDIR/bin/dbaccess $1 < $3 > $RSCTMP 2>&1
+
+    else
+	/bin/echo "$2" | $INFORMIXDIR/bin/dbaccess $1 > $RSCTMP 2>&1
+    fi
+
+    if /bin/grep -e "ISAM" -e "Error" -e "syntax" -e "no space" -e "failed" $RSCTMP > /dev/null
+    then
+
+	(
+	    /bin/echo "The SQL Command you ran failed because:"
+	    /bin/echo
+	    /bin/cat $TMP5
+	) | /bin/pg
+
+	ReturnToContinue
+	return 1
+    fi
+
+    return 0
+}
+
+
+: '
+/*
+ * NAME 	: ListScripts - find all scripts of a certain type 
+ *
+ * USAGE	: ListScripts <class> [ <database> ]
+ *
+ *
+ * ARGUMENTS	: <class> == [ ".db" | ".tab" | ".idx" .....] 
+ *                <database> - the optional name of the database
+ *
+ * DESCRIPTION	: Gives you a list of a class of scripts
+ *
+ * NOTES	:
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+
+
+ListScripts()
+{
+    CDIR="`pwd`"
+
+    cd $RELEASEDIR 
+
+    if [ "$1" = "db" ]
+    then
+	ls *.db | sed 's/.db//' > $TMP5
+    else
+
+	if [ "$2" != "" -a -d "$2" ]
+	then
+	    cd $2
+	fi 
+
+	eval find . -type f -name "'*.$1'" -print | \
+	    sed -e "s|\.$1||" -e 's/.*\///' | sort > $TMP5
+
+    fi
+
+    cd $CDIR
+
+    if [ -s $TMP5 ]
+    then
+	cat $TMP5
+	return 0
+    else
+	return 1
+    fi
+}
+
+
+: '
+/*
+ * NAME 	: CreateDatabase - Create a database
+ *
+ * USAGE	: CreateDatabase <dbname> <dbscriptfile>
+ *
+ * ARGUMENTS	: <dbname> - the name of the database to create
+ *		: <dbscriptfile> - the name of the create script to run
+ *
+ * DESCRIPTION	:
+ *
+ * NOTES	: Present the user with a list of scripts of type .db and ask which
+ *		  which one he wants to create or all for all of them;
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+
+CreateDatabase()
+{
+    if CheckObjectExists db sysmaster $1
+    then
+	echo "Database $1 already exists"
+	ReturnToContinue
+    else
+
+	if RunSQLCommand - -f $2
+	then
+	    return 0
+	fi
+    fi
+    return 1
+}
+
+: '
+/*
+ * NAME 	: CreateObjects - Run all the "objects" for a database
+ *
+ * USAGE	: CreateObjects <database> <class>
+ *
+ * ARGUMENTS	: <database> - name of the database
+ *		  <class> - type of thing to create (table, index, etc)
+ * DESCRIPTION	:
+ *
+ * NOTES	:
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+
+CreateObjects()
+{
+    if [ ! $# -eq 2 ]
+    then
+	echo "$0: Incorrect arg count on CreateObject"
+	return 1
+    fi
+
+    DB=$1
+
+    case $2 in
+    tab)
+	CLASSDESC="table"
+	CLASS=tab
+	;;
+    alt)
+	CLASSDESC="alter"
+	CLASS=alt
+	;;
+    idx)
+	CLASSDESC="index"
+	CLASS=idx
+	;;
+    trg)
+	CLASSDESC="trigger"
+	CLASS=trg
+	;;
+    pro)
+	CLASSDESC="procedure"
+	CLASS=pro
+	;;
+    viw)
+	CLASSDESC="view"
+	CLASS=viw
+	;;
+    ri)
+	CLASSDESC="referential integrity"
+	CLASS=ri
+	;;
+    *)
+	echo "$0: Incorrect type for CreateObject"
+	return 1
+	;;
+	
+    esac
+
+
+    if ListScripts "$2" $DB > $TMP2
+    then
+
+	set `wc -l $TMP2`
+
+	if [ $1 -gt 1 ]
+	then
+	    echo "There are $1 Objects of type $CLASSDESC to build in Database $DB"
+	else
+	    echo "There is $1 Object of class $CLASSDESC to build in Database $DB"
+	fi
+
+	LogMesg "Starting Build of $CLASSDESC class [ $1 objects to build]"
+
+	for OBJECT in `cat $TMP2`
+	do
+	    if grep "$CLASSDESC $OBJECT Created successfully" $LOGFILE > /dev/null
+	    then 
+		echo "Skipping $CLASSDESC $OBJECT"
+		continue
+	    fi
+
+	    if CheckObjectExists $CLASS $DB $OBJECT
+	    then
+		echo "Object $OBJECT already exists in $DB"
+		continue
+	    fi
+
+	    if RunSQLCommand $DB -f $RELEASEDIR/${DB}/*/${OBJECT}.$CLASS
+	    then
+		echo; echo "$CLASSDESC $OBJECT Created successfully"
+		LogMesg INFO "$CLASSDESC $OBJECT Created successfully"
+	    else
+		echo; echo "Couldn't create $CLASSDESC $OBJECT"
+
+		if AskYN "Continue (y/N)? \c"
+		then
+		    continue
+		else
+		    return 1
+		fi
+	    fi
+
+	done
+
+	LogMesg INFO "All Objects of $CLASSDESC build successfully"
+
+    else
+	echo "Sorry, no Objects of type $CLASSDESC were found"
+	return 1
+    fi
+}
+
+
+: '
+/*
+ * NAME 	: GetRangeValue - Read from the Screen and place the answer in to 
+ *                                the environment variable  passed - if it is withing range
+ *
+ * USAGE	: GetRangeValue <Environment Variable Name> <message> <min>:<max> 
+ *
+ * ARGUMENTS	: The name of the <Environment Variable Name> you want the value in and
+ *		  a user friendly <message>.
+ *		  The <min> value and the <max> value accepted
+ *
+ * DESCRIPTION	:
+ *
+ * NOTES	:
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+
+GetRangeValue()
+{
+    [ $# -eq 3 ] || echo "GetRangeValue: Incorrect Arguements"
+
+    MIN="`expr $3 : '\([0-9][0-9]*\):[0-9][0-9]*'`"
+    MAX="`expr $3 : '[0-9][0-9]*:\([0-9][0-9]*\)'`"
+
+    while :
+    do
+	echo "$2"
+
+	read _d_u_m_m_y
+
+	if [ $_d_u_m_m_y -lt $MIN -o $_d_u_m_m_y -gt $MAX ]
+	then
+	    echo "The Value $_d_u_m_m_y is not within range >= $MIN or <= $MAX"
+	    _d_u_m_m_y=""
+	    continue
+	else
+	    break
+	fi
+    done
+
+    eval $1=$_d_u_m_m_y
+
+    export $1
+}
+
+: '
+/*
+ * NAME 	: IsInvalidClass
+ *
+ * USAGE	: IsInvalidClass <class>
+ *
+ * ARGUMENTS	: <class> - class of object
+ *
+ * DESCRIPTION	: Checks out a class and if valid sets G_CLASSDESC to an english
+ *		  description
+ *
+ * NOTES	: WARNING (sorry to shout) - this sets the global variable
+ *		  G_CLASSDESC to an english description of the class.
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+
+IsInvalidClass()
+{
+    if [ ! $# -eq 1 ]
+    then
+	echo "IsInvalidClass: Incorrect arg count on IsInvalidClass [$*]"
+	LogMesg ERROR "IsInvalidClass: Incorrect arg count on IsInvalidClass [$*]"
+	return 0
+    fi
+
+    case $1 in
+
+    dat) G_CLASSDESC="data file"
+	;;
+    unl) G_CLASSDESC="unload file"
+	;;
+    tab) G_CLASSDESC="table"
+	;;
+    alt) G_CLASSDESC="alter"
+	;;
+    idx) G_CLASSDESC="index"
+	;;
+    trg) G_CLASSDESC="trigger"
+	;;
+    pro) G_CLASSDESC="procedure"
+	;;
+    viw) G_CLASSDESC="view"
+	;;
+     ri) G_CLASSDESC="referential integrity constraint"
+	;;
+      *) G_CLASSDESC=""
+	return 0
+	;;
+	
+    esac
+
+    export G_CLASSDESC
+
+    return 1
+}

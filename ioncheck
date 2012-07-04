@@ -1,0 +1,348 @@
+#!/bin/sh
+
+: '{{ TOOLDOC 1
+/*
+ * NAME 	: ioncheck - check the consistency of a database
+ *
+ * USAGE	: ioncheck [database | database...]
+ *
+ * ARGUMENTS	: <database> - a list of databases to check
+ *
+ * DESCRIPTION	: ioncheck checks the consistency of a database and is designed
+ *		  to be run on a periodic basis
+ *
+ * NOTES	: If data pages are corrupt, then there is nothing that can be 
+ *		  done apart from restoring the database.
+ *
+ * EXTERNAL 
+ * INTERFACES	: This program writes a log file (by default ioncheck.log) to
+ *		  the current directory. If you desire an alternate location or
+ *		  name the set LOGFILE in your environment to point to that 
+ *		  location.
+ *
+ *		  Log file Spinning
+ *                -----------------
+ *
+ *                To ensure that the logfile $_LOGFILE does not grow too large, 
+ *		  it is "spun" when it reaches 50000 bytes to ${_LOGFILE}-1
+ * 
+ *		  Environment Variables
+ *                ---------------------
+ *
+ *		  INFORMIXDIR 
+ *		  ONCONFIG 
+ *		  PATH
+ *
+ *		  The above are plucked from the environment.
+ *
+ * SEE ALSO	: $INFORMIXDIR/bin/oncheck which is documented in
+ *		  the Informix Online System Administration Manual
+ *
+ * FUNCTIONS	: libdb.sh(CheckObjectExists)
+ *		  libdb.sh(LogMesg())
+ *
+ * SCCS ID	: @(#)ioncheck	1.10
+ */
+'
+
+_IOCPROG="`basename $0`" export _IOCPROG
+_IOCLOGFILE=${LOGFILE:-"ioncheck.log"}
+
+_IOCDIR=$INFORMIXDIR
+
+_IOCCONFIG=${ONCONFIG}
+
+#
+# Check for the existance of INFORMIXDIR and ONCONFIG
+#
+
+if [ ! -d $INFORMIXDIR ]
+then
+    echo "$_IOCPROG: INFORMIXDIR set to non-existant directory"
+    exit 1
+fi
+
+if [ ! -f $INFORMIXDIR/etc/$ONCONFIG ]
+then
+    echo "$_IOCPROG: ONCONFIG set to non-existant config file"
+    exit 1
+fi
+
+
+#
+#  Now set the PATH to include the informix directories
+#
+
+PATH="${INFORMIXDIR}/bin:$PATH" export PATH
+
+
+: '
+/*
+ * NAME 	: CheckObjectExists - check whether object type exists
+ *
+ * USAGE	: CheckObjectExists <class> <database> <objectname>
+ *
+ * ARGUMENTS	: <class> - [ db | idx | tab | con | trg ] 
+ *
+ *		  <database> - the name of the database
+ *
+ *		  <objectname> - the name of the thing you are looking for
+ *
+ * DESCRIPTION	: similar to Checkdatabase stripping out all but the result of 
+ *		  the count
+ *
+ * NOTES	: Only works properly for a non Ansi database because the 
+ *		  assumption is that 1 or 0 is the result of the query.  
+ *		  Returns 0 success, 1 failure.
+ *
+ * EXTERNAL
+ * FUNCTIONS	: Calls LogMesg
+ *
+ * SEE ALSO	: LogMesg 
+ *
+ */
+'
+
+CheckObjectExists()
+{
+    case $1 in
+    db)
+	_CTDBNAME=sysmaster
+	_CTNAME=name
+	_CTCLASS=sysdatabases
+	;;
+    idx)
+	_CTDBNAME=$3
+	_CTNAME=idxname
+	_CTCLASS=sysindexes
+	;;
+    tab)
+	_CTDBNAME=$3
+	_CTNAME=tabname
+	_CTCLASS=systables
+	;;
+    con)
+	_CTDBNAME=$3
+	_CTNAME=constrname
+	_CTCLASS=sysconstraints
+	;;
+    trg)
+	_CTDBNAME=$3
+	_CTNAME=trigname
+	_CTCLASS=systriggers
+	;;
+    *)
+	LogMesg ERROR "E_CheckObject: Unknown type of object [ $* ]"
+	return 1
+    esac
+
+    ( 
+	echo "SELECT count(*) FROM ${_CTCLASS} WHERE ${_CTNAME} = '\c"; 
+	echo "$2'" 
+    ) | ${INFORMIXDIR}/bin/dbaccess "${_CTDBNAME}" 2> /dev/null | \
+				    sed  -e '/^$/d' \
+					 -e '/count/d' \
+					 -e 's/  *//' | grep  1 > /dev/null
+
+    [ $? -eq 0 ] && return 0 || return 1
+}
+
+: '
+/*
+ * NAME 	: LogMesg - log a message to a file, screen or mail it
+ *
+ * USAGE	: LogMesg <type> <userid> <message>
+ *
+ * ARGUMENTS	: <type> - [ ERROR | MAIL | USER ] 
+ *
+ *		  <userid> - a user id from the /etc/passwd file
+ *		  <message> - an informational message
+ *
+ * DESCRIPTION	: Logs a timestamped message to the file pointed to by LOGFILE
+ *                or to ioncheck.log if this is not set (see description at
+ *                the top).
+ *
+ *		  The <type> determines the destination of the message. If
+ *		  it is ERROR - then the message comes to the screen and
+ *		  is logged to the LOGFILE.
+ *		  If MAIL then the message is logged in the log file, to the
+ *		  screen and is mailed to <userid>.
+ *		  Otherwise if USER, the message is logged in a log file only.
+ *		  
+ * NOTES	: This function implements a "spinning" procedure so that it
+ *		  does not endlessly gobble up disk space. If the file is 
+ *		  greater than 50000 bytes in size, it renames the log file to
+ *		  the same name plus a post fix of -1:
+ *
+ *		  e.g. ioncheck.log will become ioncheck.log-1
+ *
+ * SEE ALSO	: _IOCLOGFILE
+ *
+ */
+'
+
+LogMesg()
+{
+    #
+    # Set up the type of message and shift the params list
+    #
+
+    _LMMAILTO=""
+
+    _LMTYPE="$1"
+    shift
+
+
+    #
+    # set up the appropriate message prefix
+    #
+
+    if [ "$_LMTYPE" = "ERROR" ]
+    then
+
+	_LMPREFIX="E_${_IOCPROG} " 
+
+    elif [ "$_LMTYPE" = "MAIL" ] 
+    then
+
+	_LMPREFIX="E_${_IOCPROG} "
+	_LMMAILTO="$1"
+
+	shift
+
+	if grep "^${_LMMAILTO}" /etc/passwd > /dev/null
+	then
+	    :
+	else
+	    _LMMAILTO=""
+	    echo "LogMesg: Attempt to mail to unknown user [ ${_LMMAILTO} $* ]" 1>&2
+	fi
+
+    else
+	_LMTYPE=""
+	_LMPREFIX="U_${_IOCPROG} "
+    fi
+
+    #
+    # If the log file does not exist - create it - this stops the ls command
+    # below messing up
+    #
+
+    [ -f ${_IOCLOGFILE} ] || touch ${_IOCLOGFILE}
+    
+    SIZE="`ls -l ${_IOCLOGFILE} | awk '{ print $5 }'`"
+
+    #
+    # If it's too big - spin that log!
+    #
+
+    if [ "$SIZE" -gt 50000 ]
+    then
+	mv -f ${_IOCLOGFILE} ${_IOCLOGFILE}-1 && chmod 444 ${_IOCLOGFILE}-1
+    fi
+
+    #
+    # Log the message to the LOGFILE
+    #
+
+    _LMDATE=`date +"%y-%m-%d %H:%M:%S"`
+
+    echo "${_LMPREFIX}[${_LMDATE}] $*" >> ${_IOCLOGFILE}
+
+    #
+    # If this is an error message - send it to the screen too
+    #
+
+    if [ "${_LMPREFIX}" = "E_${_IOCPROG} " ]
+    then
+	echo "${_LMPREFIX}[${_LMDATE}] $*"
+    fi
+
+    #
+    # If we were required to mail a  message - then send it with an 
+    # appropriate subject
+    #
+
+    if [ "${_LMMAILTO}" != "" ]
+    then
+	echo "${_LMPREFIX}[${_LMDATE}] $*" | mail -s "${_IOCPROG} Error Message" ${_LMMAILTO}
+    fi
+}
+
+LogMesg INFO "Start execution"
+
+trap 'rm -f $TMP; exit 0' 0 1 2 3 15
+
+TMP="/tmp/.oc.$$"
+
+_LMEXIT=0
+
+for _IOCDBNAME in $*
+do
+
+    if CheckObjectExists db $_IOCDBNAME
+    then
+	LogMesg INFO "Checking Database $_IOCDBNAME"
+    else
+	LogMesg MAIL informix "Check of non-existant database $_IOCDBNAME"
+	continue
+    fi
+
+    LogMesg INFO "Checking System Catalogs on $_IOCDBNAME"
+
+    if oncheck -qy -cc $_IOCDBNAME > $TMP
+    then
+	LogMesg INFO "Successfully checked system catalogues on $_IOCDBNAME"
+    else
+	LogMesg MAIL informix "${_IOCPROG} failed checking system catalogues on $_IOCDBNAME"
+	_LMEXIT=1
+    fi
+
+
+    LogMesg INFO "Checking Table Extents on $_IOCDBNAME"
+
+    if oncheck -qy -ce $_IOCDBNAME > $TMP
+    then
+	LogMesg INFO "Succesfully checked extents on $_IOCDBNAME"
+    else
+	LogMesg MAIL informix "${_IOCPROG} failed checking extents on $_IOCDBNAME"
+	_LMEXIT=2
+    fi
+
+    LogMesg INFO "Checking Reserved Pages on $_IOCDBNAME"
+
+    if oncheck -qy -cr $_IOCDBNAME > $TMP
+    then
+	LogMesg INFO "Successfully checked reserved pages on $_IOCDBNAME"
+    else
+	LogMesg MAIL informix "${_IOCPROG} failed checking reserved Pages on $_IOCDBNAME"
+	_LMEXIT=3
+    fi
+
+
+    LogMesg INFO "Checking Index Pages on $_IOCDBNAME"
+
+    if oncheck -qy -cI $_IOCDBNAME > $TMP
+    then
+	LogMesg INFO "Successfully checked index pages on $_IOCDBNAME"
+    else
+	LogMesg MAIL informix "${_IOCPROG} failed checking Index Data Pages on $_IOCDBNAME"
+	_LMEXIT=4
+    fi
+
+
+    LogMesg INFO "Checking Data Pages on $_IOCDBNAME"
+
+    if oncheck -qy -cD $_IOCDBNAME > $TMP
+    then
+	LogMesg INFO "Successfully checked table data pages on $_IOCDBNAME"
+    else
+	LogMesg MAIL informix "${_IOCPROG} failed checking Table Data Pages on $_IOCDBNAME"
+	_LMEXIT=5
+    fi
+
+done
+
+LogMesg INFO "Finished Execution"
+
+exit $_LMEXIT 

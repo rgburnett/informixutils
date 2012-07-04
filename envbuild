@@ -1,0 +1,1398 @@
+#!/bin/sh
+
+: '{{ TOOLDOC 1
+/*
+ * NAME 	: envbuild - build and configure the Informix Online Server 
+ *
+ * USAGE	: envbuild [ configuration file ]
+ *
+ * ARGUMENTS	: configuration file - an optional configuration file rather
+ *		                         than the default envbuild.cfg
+ *
+ * DESCRIPTION	: envbuild builds the Informix Online engine from a default 
+ *		  installation of the Informix product to a fully configured 
+ *		  runtime installation. 
+ *
+ *		  envbuild performs the following sequence of serially dependent 
+ *		  operations:
+ *
+ *		  The informix environment variables are used to determine where
+ *		  the Informix installation resides and what the server and 
+ *		  configuration file should be called.
+ *
+ *		  A copy of $INFORMIXDIR/etc/onconfig.std is used as a 
+ *		  "boiler plate" for the configuration. 
+ *		
+ *		  This file is named $INFORMIXDIR/etc/$ONCONFIG and is
+ *		  modified to default values below:
+ *
+ *			BUFFERS 200
+ *			LOGFILES 3
+ *			LOGSIZE 500
+ *			LOGSMAX 256
+ *			TAPEDEV /dev/null
+ *			LTAPEDEV /dev/null
+ *
+ *		  The above values allow the startup of a minimal Informix 
+ *		  installation.
+ *
+ *		  Once the $ONCONFIG configuraton file has been changed, a 
+ *		  check is made to see whether an instance of this server is 
+ *		  running. If it is the user has the option of aborting or 
+ *		  continuing with the build. If the user decides to continue, 
+ *		  it will result in the installation being fully reinitialised 
+ *		  and the existing disk fragments will be overwritten.
+ *
+ *		  The configuration file is read for the location of the 
+ *		  rootdbs and these parameters are then put into the 
+ *		  current configuration file and the engine is initialised 
+ *		  to single user mode.
+ *
+ *		  Providing this is successful the remaining database spaces 
+ *		  are built. 
+ *
+ *		  It is now time to make the new logical logs. This process 
+ *		  involves two backups of the database. This is because before 
+ *		  a log can be used, it the database must be backed up with a 
+ *		  level 0 archive. This is accomplished by issuing an ontape 
+ *		  -s command. For more on the pedantics of Informix, consult 
+ *		  the Informix Online Engine System Administration Guide, 
+ *		  volumes 1 and 2. The initial logs which reside in the 
+ *		  rootdbs database space are then dropped as they are no 
+ *		  longer required.
+ *
+ *		  Once the logs are available, it is time to build the 
+ *		  sysmaster database which contain the system catalogues. 
+ *		  This is quite an onerous task for some reason and we have to 
+ *		  wait for it to complete before backing up Informix.
+ *
+ *		  This frees the logs which we have just created and allows us 
+ *		  to force the checkpoint onto the new logs so that we can 
+ *		  drop the root logs.
+ *
+ *		  Once the root logs have been dropped, our task is almost 
+ *		  finished all that remains now is to optimise the database 
+ *		  and then check out the system catalogs.
+ *
+ *		  All done.
+ *		  
+ *
+ * NOTES	: Using the "boiler plate" method rather than including a full 
+ *		  set of configuration defaults in the envbuild.cfg file was 
+ *		  chosen due to the substantial changes which were made 
+ *		  between 7.10UC1 and 7.10 UD1.
+ *
+ *		  Suggested improvements would include:
+ *
+ *		     the ability to monitor the smi thread which builds the
+ *		     sysmaster database rather than just waiting a fixed period
+ *		     of time.
+ *
+ *		     More urgently is the ability to handle multiple databases 
+ *		     in the function MoveLogs - this is not difficult to do - 
+ *		     but there is not needed for release 1.0.
+ *
+ *		     Return values are ignored from most Functions and logging
+ *		     is not exactly consistent.
+ *
+ *		     Ability to move the physical log from the rootdbs
+ *
+ * EXTERNAL 
+ * INTERFACES	: This program writes a log file (by default envbuild.log) to
+ *		  the current directory. If you desire an alternate location or
+ *		  name the set LOGFILE in your environment to point to that 
+ *		  location.
+ *
+ *		  Log file Spinning
+ *                -----------------
+ *
+ *                To ensure that the logfile $_LOGFILE does not grow too large, 
+ *		  it is "spun" when it reaches 500000 bytes to ${_LOGFILE}-1
+ * 
+ *		  Environment Variables
+ *                ---------------------
+ *
+ *		  INFORMIXDIR 
+ *		  ONCONFIG 
+ *		  PATH 
+ * 
+ *		  are taken from the environment 
+ *
+ *
+ * CONFIGURATION
+ * FILE
+ * LAYOUT	: The config file is a colon delimited file and looks like this
+ *
+ * 	
+    DBROOT:rootdbs:1:0:0:/blah/data/rootdbs:0:10000:/blah/rootmirror:0
+    DBLOG:logspace:0:0:0:/blah/data/logspace:0:5000::
+    DBSPACE:airframe:1:0:0:/blah/data/airframe:0:5000:/blah/generalmirror:0
+    DBCHUNK:airframe:/inf_chunks/airframechunk2:0:5000:/blah/generalmirror:22500
+    CONFIG:BUFFERS:2000
+    CONFIG:CLEANERS:2
+    CONFIG:LOGFILES:10
+
+ * The file is basically split up by type of entry:
+ *
+ * DBROOT	: This is the definition of the root db space. The fields and
+ *                their values are:
+ *   
+ *              1 - DBROOT - this is the type identifier and is always DBROOT
+ *
+ *		2 - rootdbs - this will always be rootdbs
+ *   
+ *              3 - mirror - 1 if the chunk is mirrored 0 otherwise
+ *
+ *		4 - temp - 1 if the chunk is a temporary space 0 otherwise
+ *   
+ *              5 - blob - 1 if this is a blob space - not implemented - always 0
+ *
+ *		6 - file - the device name for this chunk - system dependent
+ *   
+ *              7 - offset - any initial file offset used - normally 0
+ *
+ *		8 - size - in K of the chunk
+ *
+ *	 	9 - file - path of the mirror
+ *		
+ *	       10 - offset - any initial offset
+ *
+ * DBLOG	: This is the definition of the logfile dbspace. The fields and
+ *                their values are as for DBROOT
+ *
+ * DBCHUNK	: This is the definition of an additional chunk for a dbspace.
+ *		  The fields and their values are as DBROOT
+ *
+ * CONFIG	: This is a runtime configuration variable that will be set
+ *		  when Informix starts up.
+ *		
+ *              1 - CONFIG - this is the type identifier and is always CONFIG
+ *
+ *              2 - parameter - this the name of onconfig parameter which you
+ *                              wish to set.
+ *
+ *		3 - value - the value you want it set to.
+ *
+ *
+ * SEE ALSO	: $INFORMIXDIR/bin/oncheck which is documented in
+ *		  the Informix Online System Administration Manual
+ *
+ * FUNCTIONS	: 
+ *
+ * NAME 	: envbuild - build and configure the Informix Online Server 
+ * NAME 	: Working - Display an activity whilst Informix is starting up 
+ * NAME 	: NotWorking - When job has finished, the activity indicator process
+ * NAME 	: LogMesg - log a message to a file
+ * NAME 	: OverWrite
+ * NAME 	: SetConfigParameter - set a config parameter in the Informix onconfig file
+ * NAME 	: SetAndCheckDevice
+ * NAME 	: CopyOnconfigFile - set up the Informix enviroment
+ * NAME 	: SetOnconfigFile - Setup the Informix configuration file
+ * NAME 	: BuildRootDbspace - Build the rootdbs space 
+ * NAME 	: IsOnlineUp - is the current engine running in &lt;mode&gt;?
+ * NAME 	: ShutDownOnline - shut down this instance of the online engine
+ * NAME 	: CreateDbSpaces - create database spaces
+ * NAME 	: MakeLogs - construct the Informix Logs
+ * NAME 	: BackUpToDevNull - back the informix database
+ * NAME 	: MoveCheckPoint - move the informix checkpoint into the new logs
+ * NAME 	: DropRootLogs	- Drop the logs in rootdbs
+ * NAME 	: ChangeOnlineMode - is the current engine running in &lt;mode&gt;?
+ *
+ * Owner	: Graeme Burnett
+ *
+ * PERMS	: 555
+ *
+ * STATUS	: SUPPORTED
+ *
+ * SCCS ID	: %W% 
+ *
+ * DATED	: %D% %T% 
+ *
+ * Continuus
+ * 
+ * Type		: %cvtype: %
+ * Created by	: %created_by: %
+ * Date Created	: %date_created: %
+ * Date Modified: %date_modified: %
+ * Derived by	: %derived_by: %
+ * File/Version	: %filespec: %
+ *
+ */
+'
+
+_EBPROG="`basename $0`" export _EBPROG
+_EBLOGFILE=${LOGFILE:-"envbuild.log"} export _EBLOGFILE
+_EBCONFIGFILE="envbuild.cfg" export _EBCONFIGFILE
+_EBONCONFIG=$ONCONFIG
+
+G_DBSPACENAME=""
+G_ISMIRRORED=""
+G_ISTEMP=""
+G_ISBLOB=""
+G_SPACEPATH=""
+G_SPACEOFFSET=""
+G_SPACESIZE=""
+G_MIRRORPATH=""
+G_MIRROROFFSET=""
+
+export G_DBSPACENAME G_ISMIRRORED G_ISTEMP G_ISBLOB G_SPACEPATH G_SPACEOFFSET 
+export G_SPACESIZE G_MIRRORPATH G_MIRROROFFSET
+
+: '
+/*
+ * NAME 	: LogMesg - log a message to a file
+ *
+ * USAGE	: LogMesg &lt;class&gt; &lt;message&gt;
+ *
+ * ARGUMENTS	: &lt;class&gt; type of message (ERROR or othewise)
+ * 		  &lt;message&gt; - any textual message
+ *
+ * DESCRIPTION	: Logs a timestamped message to the file pointed to by LOGFILE
+ *                or to _LMLOGFILE (which is set to logmesg.log) if this is not 
+ *                set.
+ *
+ * NOTES	: This function implements a "spinning" procedure so that it
+ *		  does not endlessly gobble up disk space. If the file is 
+ *		  greater than 50000 bytes in size, it renames the log file to
+ *		  the same name plus a post fix of -1:
+ *
+ *		  e.g. ioncheck.log will become ioncheck.log-1
+ *
+ * EXTERNAL 
+ * INTERFACES	: This will write a log file in the current directory 
+ *                
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+
+LogMesg()
+{
+    _LMLOGFILE="${LOGFILE:-logfile.log}"
+    _PROGNAME="${PROGNAME:-`basename $0`}"
+
+    [ "$1" = "ERROR" ] &amp;&amp; _LMPREFIX="E_${_PROGNAME} " || _LMPREFIX="U_${_PROGNAME} "
+
+    shift
+
+    [ -f ${_LMLOGFILE} ] || touch ${_LMLOGFILE}
+    
+    SIZE="`ls -l ${_LMLOGFILE} | awk '{ print $5 }'`"
+
+    if [ "$SIZE" -gt 500000 ]
+    then
+	mv -f ${_LMLOGFILE} ${_LMLOGFILE}-1 &amp;&amp; chmod 444 ${_LMLOGFILE}-1
+    fi
+
+    echo $*
+
+    (
+	_LMDATE=`date +"%y-%m-%d %H:%M:%S"`
+	echo "${_LMPREFIX}[${_LMDATE}] $*"
+    ) &gt;&gt; ${_LMLOGFILE}
+}
+
+: '
+/*
+ * NAME 	: OverWrite
+
+ * USAGE	: OverWrite &lt;file&gt; &lt;cmd&gt; [args]
+ *
+ * ARGUMENTS	: &lt;file&gt; - The file to be overwritten
+ *		  &lt;cmd&gt;  - The command to be used to overwrite the file
+ *		  [args] - Any arguements which the &lt;cmd&gt; may need
+ *
+ * DESCRIPTION	: This is a blatant copy of the overwrite function described
+ *		  in Kerighan and Pikes "The Unix Programming Environment"
+ *
+ *		  It allows the safe overwriting of a file during which process
+ *		  a transformation can take place by &lt;cmd&gt;
+ *
+ *		  For a full description, buy the book
+ *
+ * NOTES	: May have some side effects on traps set - this was a stand
+ *		  alone program in the book - here it is a function. If you
+ *		  set a trap elsewhere in your program, you should modify this
+ *		  routine to handle traps properly
+ *
+ * SEE ALSO	: The Bourne Shell by S. R. Bourne.
+ *
+ */
+'
+
+OverWrite()
+{
+    OPATH="$PATH"
+    PATH=/bin:/usr/bin
+
+    case $# in
+    0|1)
+	echo 'Usage: OverWrite file cmd [args]' 1&gt;&amp;2; exit 2
+    esac
+
+    file=$1; shift
+    new=/tmp/overwr1.$$; old=/tmp/overwr2.$$
+    trap 'rm -f $new $old; exit 1' 1 2 15
+
+    if PATH=$OPATH "$@" $file &gt; $new
+    then
+	cp $file $old
+	trap '' 1 2 15
+	cp $new $file
+    else
+	echo "OverWrite: $1 failed, $file unchanged" 1&gt;&amp;2
+	return 1
+    fi
+
+    rm -f $new $old
+
+    PATH="$OPATH" export PATH	
+
+    return 0	
+}
+
+: '
+/*
+ * NAME 	: SetConfigParameter - set a config parameter in the Informix onconfig file
+ *
+ * USAGE	: SetConfigParameter &lt;parameter&gt; &lt;value&gt;
+ *
+ * ARGUMENTS	: &lt;parameter&gt; - The target parameter to set
+ *		  &lt;value&gt;     - The value to set it to
+ *
+ * DESCRIPTION	: This function will set the parameter passed to the value passed in
+ *		  the current $INFORMIXDIR/etc/$ONCONFIG file.
+ *
+ * NOTES	: This is, in the spirit of all shell scripts, dreadfully 
+ *		  inefficient but it works.
+ *
+ * SEE ALSO	: $INFORMIXDIR/etc/$ONCONFIG
+ *
+ */
+'
+
+SetConfigParameter()
+{
+
+    if [ $# -lt 1 ]
+    then
+	echo "SetConfigParameter: wrong args $*" 1&gt;&amp;2
+	return 1
+    fi
+
+    SCPLINE="`grep $1 $INFORMIXDIR/etc/$ONCONFIG`"
+
+    if [ -z "$SCPLINE" ]
+    then
+	#
+	# Nothing to set
+	#
+	return 1
+    fi
+
+    DOLLAR1="$1"
+    shift
+
+    LogMesg INFO "Setting $DOLLAR1 $* in $INFORMIXDIR/etc/$ONCONFIG"
+
+    OverWrite $INFORMIXDIR/etc/$ONCONFIG sed "s|$DOLLAR1[ 	][ 	]*.*#|$DOLLAR1	$*		#|"
+}
+
+
+: '
+/*
+ * NAME 	: CreateInputFile - create an envbuild.cfg file from the Informix instance 
+ *
+ * USAGE	: CreateInputFile &lt;outputfilename&gt;
+ *
+ * ARGUMENTS	: &lt;outputfilename&gt; - The file you wish to dump the config to
+ *
+ * DESCRIPTION	: This routine creates the config file for the dbspaces. It
+ *		  queries the sysmaster database for all the details pertaining
+ *		  to the database physical layout to enable reconstruction at
+ *		  a later date.
+ *
+ * NOTES	: The intended usage for this routine is to export the dbspace
+ *		  config of an installation which has been constructed and is
+ *		  ready for shipping. It will enable the envbuild utility to
+ *		  recreate all  the dbspaces in the correct partitions on site.
+ *
+ * 		  It needs to check for the existence of a database first
+ *
+ * SEE ALSO	: envbuild description.
+ *		  Online System Administration manual 1 &amp; 2
+ */
+'
+
+CreateInputFile()
+{
+
+    (
+	$INFORMIXDIR/bin/dbaccess sysmaster &lt;&lt;!
+		SELECT
+		    d.name,
+		    d.is_mirrored,
+		    d.is_temp,
+		    d.is_blobspace,
+		    s.fname,
+		    s.offset*4 offset,
+		    s.chksize*4 chksize,
+		    s.mfname,
+		    s.moffset*4 moffset
+		FROM
+		    sysdbspaces d,
+		    syschunks s
+		WHERE
+		    d.dbsnum = s.dbsnum;
+!
+	)  2&gt;/dev/null | sed '/^$/d' | awk '{
+
+	if ( $1 ~ /^name/ )
+	{
+	    
+	    if ( $2 ~ /rootdbs/ )
+		printf("DBROOT:");
+
+	    else if ( $2 ~ /^log.*/ )
+		printf("DBLOG:");
+	    else
+	    {
+		if ( spaces [ $2 ] == 1)	
+		    printf("DBCHUNK:");
+		else
+		{
+		    printf("DBSPACE:");
+		    spaces [ $2 ] = 1;
+	 	}	
+	    }
+	}
+
+	if ( $1 ~ /moffset/ ) # This is the end of record
+	{
+        if ($2 == "")
+			$2 = 0
+
+	    printf("%s\n", $2)
+	}
+	else
+	    printf("%s:", $2)
+	}'
+cat &lt;&lt;!
+CONFIG:BUFFERS:2000
+CONFIG:CLEANERS:2
+CONFIG:LOGFILES:10
+CONFIG:LOGSIZE:500
+!
+}
+
+
+: '
+/*
+ * NAME 	: SetAndCheckDevice
+ *
+ * USAGE	: SetAndCheckDevice &lt;dbspace&gt;
+ *
+ * ARGUMENTS	: &lt;dbspace&gt; - the name of the database space
+ *
+ * DESCRIPTION	: SetAndCheckDevice will parse the configuration file for
+ *		  all the parameters which are required to in order to set up
+ *		  a dbspace. It sets a series of globals detailed below.
+ *
+ * NOTES	: This sets the global variables to all the parameters which are
+ *		  needed by onspaces:
+ *
+ *		  G_DBSPACENAME
+ *		  G_ISMIRRORED
+ *		  G_ISTEMP
+ *		  G_ISBLOB
+ *		  G_SPACEPATH
+ *		  G_SPACEOFFSET
+ *		  G_SPACESIZE
+ *		  G_MIRRORPATH
+ *		  G_MIRROROFFSET
+ *
+ * SEE ALSO	: onspaces
+ *
+ */
+'
+
+SetAndCheckDevice()
+{
+    if [ ! $# -eq 1 ]
+    then
+	echo "SetAndCheckDevice: incorrect usage [ $* ]" 1&gt;&amp;2
+	exit 2
+    fi
+
+    case "$1" in
+    rootdbs)
+	SADCENTRY=`grep "^DBROOT:${1}" $_EBCONFIGFILE`
+	;;
+    phys*)
+	SADCENTRY=`grep "^DBPHYS:${1}" $_EBCONFIGFILE`
+	;;
+    log*)
+	SADCENTRY=`grep "^DBLOG:${1}" $_EBCONFIGFILE`
+	;;
+    esac
+
+    if [ -z "$SADCENTRY" ]
+    then
+	return 1
+    fi
+
+    OIFS="$IFS"
+
+
+    IFS=':'
+    set -- $SADCENTRY
+    shift
+    IFS="$OIFS"
+
+    G_DBSPACENAME="$1"
+    G_ISMIRRORED="$2"
+    G_ISTEMP="$3"
+    G_ISBLOB="$4"
+    G_SPACEPATH="$5"
+    G_SPACEOFFSET="$6"
+    G_SPACESIZE="$7"
+    G_MIRRORPATH="$8"
+    G_MIRROROFFSET="$9"
+
+    if [ ! -r "$G_SPACEPATH" ]
+    then
+	echo "Data device for dbspace [ $1 ] non existant [ $G_SPACEPATH ]" 1&gt;&amp;2
+	return 1
+    elif [ ! -z "$G_MIRRORPATH" -a ! -f "$G_SPACEPATH" ]
+    then
+	echo "Mirror device for dbspace [ $1 ] non existant [ $G_MIRRORPATH ]" 1&gt;&amp;2
+	return 1
+    fi
+}
+
+: '
+/*
+ * NAME 	: CopyOnconfigFile - set up the Informix enviroment
+ *
+ * USAGE	: CopyOnconfigFile
+ *
+ * ARGUMENTS	: none
+ *
+ * DESCRIPTION	: CopyOnconfigFile does exactly that. It sets up and checks
+ *		  the Informix enviroment specifically from /etc/environemnt
+ *
+ * NOTES	: This routine has the ability to terminate the program
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+
+CopyOnconfigFile()
+{
+    #
+    # This checks out the config file either passed as an arguement or implied 
+    # from the environment
+    #
+
+
+    for _TCONFIG in "$_EBCONFIGFILE" "$1"
+    do
+	if [ -f "$_TCONFIG" ]
+	then
+	    if grep rootdbs $_TCONFIG &gt; /dev/null
+	    then
+		_EBCONFIGFILE="$_TCONFIG"
+		break
+	    fi
+	fi
+		
+    done
+
+    export _EBCONFIGFILE
+
+    #
+    # Final dum check to make sure we have a config file to operate on
+    #
+
+    if [ -z "$_EBCONFIGFILE" ]
+    then
+	echo "$_EBPROG: Oops no configuration file found!" 1&gt;&amp;2
+	return 1
+    fi
+
+    _EBDIR="$INFORMIXDIR"
+    _EBCONFIG="$ONCONFIG"
+
+    #
+    # Check for the existance of INFORMIXDIR and ONCONFIG
+    #
+
+    if [ ! -d $INFORMIXDIR ]
+    then
+	echo "$_EBPROG: INFORMIXDIR set to non-existant directory"
+	exit 1
+    fi
+
+    PATH="${INFORMIXDIR}/bin:$PATH" export PATH
+
+    #
+    # I want to check if we have a valid config file - you never know this
+    # program might have been run before 
+    #
+    # If this is not the case - take the standard confing file and modify it
+    # otherwise we will remodify the one we find
+    #
+
+    if [ -f $INFORMIXDIR/etc/$ONCONFIG ]
+    then
+	cp $INFORMIXDIR/etc/$ONCONFIG $INFORMIXDIR/etc/$ONCONFIG.sav$$
+    fi
+
+    cp $INFORMIXDIR/etc/onconfig.std $INFORMIXDIR/etc/$ONCONFIG
+}
+
+
+: '
+/*
+ * NAME 	: SetOnconfigFile - Setup the Informix configuration file
+ *
+ * USAGE	: SetOnconfigFile &lt;config build file&gt;
+ *
+ * ARGUMENTS	: &lt;config build file&gt; - the build file
+ *
+ * DESCRIPTION	: SetOnconfigFile is run AFTER the engine has started up
+ *		  and the spaces are all set up.
+ *
+ * NOTES	: This function creates temporary files to hold the config
+ *		  stuff in while it reads.
+ *
+ * SEE ALSO	: SetConfigParameter
+ *
+ */
+'
+
+SetOnconfigFile()
+{
+    if [ -f $1 ]
+    then
+	grep "^CONFIG:" $1 &gt; /tmp/.charlotte$$
+    else
+	echo "SetOnconfigFile: onconfig file $1 not found" 1&gt;&amp;2
+	LogMesg ERROR "SetConfigFile: onconfig file $1 not found"
+	return 1
+    fi
+
+    #
+    # Set everything back to basics
+    #
+
+    while read RSCFLINE
+    do
+	OIFS="$IFS"
+	IFS=':'
+	set -- $RSCFLINE
+	shift
+	IFS="$OIFS"
+	RSCFPARAMS="$*"
+
+	echo "Setting $RSCFPARAMS"
+
+	SetConfigParameter $RSCFPARAMS
+
+    done &lt; /tmp/.charlotte$$
+
+    rm -f /tmp/.charlotte$$
+
+    # PS Charlotte is the name of my cat
+
+}
+
+: '
+/*
+ * NAME 	: BuildRootDbspace - Build the rootdbs space 
+ *
+ * USAGE	: BuildRootDbspace
+ *
+ * ARGUMENTS	: none
+ *
+ * DESCRIPTION	: BuildRootDbspace sets the config parameters in the current config
+ *		  file and initialises online
+ *
+ * NOTES	: 
+ *
+ * SEE ALSO	: SetAndCheckDevice, SetConfigParameter
+ *
+ */
+'
+
+BuildRootDbspace()
+{
+    if ShutDownOnline
+    then
+	:
+    else
+	return 1
+    fi
+
+    SetAndCheckDevice rootdbs
+
+    SetConfigParameter ROOTPATH $G_SPACEPATH
+    SetConfigParameter ROOTOFFSET $G_SPACEOFFSET
+    SetConfigParameter ROOTSIZE $G_SPACESIZE	
+
+    if [ "$G_ISMIRRORED" = "1" ]
+    then
+
+	#
+	# If necessary set up the mirror devices
+	#
+
+	SetConfigParameter MIRROR  $G_ISMIRRORED
+	SetConfigParameter MIRRORPATH $G_MIRRORPATH
+	SetConfigParameter MIRROROFFSET $G_MIRROROFFSET
+    fi
+
+    SetConfigParameter DBSERVERNAME $INFORMIXSERVER
+    SetConfigParameter MSGPATH $INFORMIXDIR/online.$INFORMIXSERVER
+
+    #
+    # This is a bit of a liberty really but it is unlikely that
+    # I will get a clash of servernum as the index into the
+    # multi instance scenario. I know it is a bit gash but...
+    # 
+
+    S="`date '+%S'`"
+
+    SetConfigParameter SERVERNUM $S
+
+    #
+    # These are really the only parameters which I need to set
+    # in order to start online up
+    #
+
+    SetConfigParameter BUFFERS 200
+    SetConfigParameter LOGFILES 3
+    SetConfigParameter LOGSIZE 500
+    SetConfigParameter LOGSMAX 256
+    SetConfigParameter TAPEDEV /dev/null
+    SetConfigParameter LTAPEDEV /dev/null
+    SetConfigParameter NUMAIOVPS 2
+
+    LogMesg INFO "Online Startup [ $INFORMIXSERVER ] with [ $ONCONFIG ]\c"
+    echo "Online Startup [ $INFORMIXSERVER ] with [ $ONCONFIG ]"
+
+    $INFORMIXDIR/bin/oninit -iy 2&gt;/dev/null 1&gt;/dev/null &amp;
+
+    BRDBSCOUNT=0
+    BRDBSSUCCESS=0
+
+    while [ $BRDBSCOUNT -lt 30 ]
+    do
+	echo ".\c"
+	sleep 1
+
+	#
+	# Wait at least 5 seconds for the sysmaster database to build
+	#
+
+	if [ $BRDBSCOUNT -gt 10 ]
+	then
+
+	    if IsOnlineUp
+	    then
+		BRDBSSUCCESS=1
+		break;
+	    fi
+	fi
+
+	BRDBSCOUNT="`expr $BRDBSCOUNT + 1`"
+
+    done
+
+    echo
+
+    if [ "$BRDBSSUCCESS" != "1" ]
+    then
+
+	echo "Online Startup Failed [ $INFORMIXSERVER ] with [ $ONCONFIG ] after 20 secs"
+
+	LogMesg ERROR "Online Startup Failed [ $INFORMIXSERVER ] with [ $ONCONFIG ]"
+	return 1
+    fi
+
+    return 0
+}
+
+: '
+/*
+ * NAME 	: IsOnlineUp - is the current engine running in &lt;mode&gt;?
+ *
+ * USAGE	: IsOnlineUp &lt;mode&gt;
+ *
+ * ARGUMENTS	: &lt;mode&gt; -  [ SINGLEUSER | MULTIUSER | JUSTUP ]  
+ *
+ * DESCRIPTION	: IsOnlineUp returns 0 if online is running in either que
+ *
+ * NOTES	:
+ *
+ * SEE ALSO	: onstat
+ *
+ */
+'
+
+IsOnlineUp()
+{
+    case "$1" in
+    S*)
+	IOLUGREP='\-\- Quiescent \-\-'
+	;;
+    M*)
+	IOLUGREP='\-\- On-Line \-\-'
+	;;
+    *)
+	IOLUGREP=' Up ';;
+    esac
+
+    onstat - | grep "$IOLUGREP" &gt; /dev/null
+
+    [ $? -eq 0 ] &amp;&amp; return 0 || return 1
+}
+
+
+: '
+/*
+ * NAME 	: ShutDownOnline - shut down this instance of the online engine
+ *
+ * USAGE	: ShutDownOnline  [ -s ]
+ *
+ * ARGUMENTS	: &lt;s&gt; - operate in silent mode
+ *
+ * DESCRIPTION	: ShutDownOnline shuts down the current Informix online engine
+ *
+ * NOTES	: This kills the server using onmode -yk
+ *
+ * SEE ALSO	: onmode, IsOnlineUp
+ *
+ */
+'
+
+ShutDownOnline()
+{
+    if IsOnlineUp
+    then
+	:
+    else
+	return 0
+    fi
+
+    if [ "$1" != "-s" ]
+    then
+
+	LogMesg INFO "Online instance is running [ $INFORMIXDIR ]"
+
+	echo "Warning: Informix server for $INFORMIXSERVER with $ONCONFIG running"
+	echo "Do you want to proceed? (y)\c "
+
+	read BRDBSANS
+
+	if [ "$BRDBSANS" != "y" -a "$BRDBSANS" != "Y" ]
+	then
+	    return 1
+	fi
+    fi
+
+    LogMesg INFO "User Decided to reinitialise Online"
+    echo "Shutting down online, Please Wait ."
+
+    onmode -yk&amp;
+
+    BRDBSCOUNT=0
+
+    while [ $BRDBSCOUNT -lt 10 ]
+    do
+	if IsOnlineUp 
+	then
+	    echo ".\c"
+	    sleep 1
+	else
+	    echo
+	    break
+	fi
+
+	BRDBSCOUNT="`expr $BRDBSCOUNT + 1`"
+    done
+
+    if IsOnlineUp
+    then
+	LogMesg ERROR "Couldn't shut down Online [ $INFORMIXSERVER ] [ $ONCONFIG ]"
+	echo "Couldn't shut down Online [ $INFORMIXSERVER ] [ $ONCONFIG ]" 1&gt;&amp;2
+	return 1
+    fi
+
+    return 0
+}
+
+: '
+/*
+ * NAME 	: CreateDbSpaces - create database spaces
+ *
+ * USAGE	: CreateDbSpaces &lt;config file&gt;
+ *
+ * ARGUMENTS	: &lt;config file&gt; - 
+ *
+ * DESCRIPTION	: This builds all the database spaces
+ *
+ * NOTES	: Does not set up for blob spaces 
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+
+CreateDbSpaces()
+{
+    if [ -f $1 ]
+    then
+	grep -e '^DBSPACE:' -e '^DBCHUNK:' -e '^DBLOG' -e '^DBPHYS' $1 &gt; /tmp/.crdbs$$
+    else
+	echo "CreateDbSPaces: Config file $1 not found" 1&gt;&amp;2
+	LogMesg ERROR "CreateDbSPaces: Config file $1 not found"
+	return 1
+    fi
+
+    while read CDBSLINE
+    do
+	OIFS="$IFS"
+	IFS=':'
+	set -- $CDBSLINE
+	IFS="$OIFS"
+
+	case $1 in
+	"DBSPACE")
+	    CDBSCOMMAND="DBSPACE"
+	    CDBSDBSPACE=$2
+	    CDBSISMIRRORED=$3
+	    CDBSISTEMP=$4
+	    CDBSISBLOB=$5
+	    CDBSPATH=$6
+	    CDBSOFFSET=$7
+	    CDBSSIZE=$8
+	    CDBSMIRRORPATH=$9
+	    shift
+	    CDBSMIRROROFFSET=$9
+	    ;;
+
+	"DBLOG")
+	    CDBSCOMMAND="DBLOG"
+	    CDBSDBSPACE=$2
+	    CDBSISMIRRORED=$3
+	    CDBSISTEMP=$4
+	    CDBSISBLOB=$5
+	    CDBSPATH=$6
+	    CDBSOFFSET=$7
+	    CDBSSIZE=$8
+	    CDBSMIRRORPATH=$9
+	    shift
+	    CDBSMIRROROFFSET=$9
+	    ;;
+
+	"DBCHUNK")
+	    CDBSCOMMAND="DBCHUNK"
+	    CDBSDBSPACE=$2
+	    CDBSPATH=$3
+	    CDBSOFFSET=$4
+	    CDBSSIZE=$5
+	    CDBSMIRRORPATH=$6
+	    CDBSMIRROROFFSET=$7
+
+	esac
+
+	if [ "$CDBSCOMMAND" = "DBSPACE" -o "$CDBSCOMMAND" = "DBLOG" ]
+	then
+
+	    CDBSARGS=" -c -d $CDBSDBSPACE "
+
+	    if [ "$CDBSISTEMP" = "1" ]
+	    then
+		CDBSARGS="$CDBSARGS -t "
+	    fi
+
+	    if [ "$CDBSISBLOB" = "1" ]
+	    then
+		echo "Sorry - Blob pages not implemented yet"
+		LogMesg ERROR "Tried to set up blobs - not supported yet"
+		return 1
+	    fi
+
+	    CDBSARGS="$CDBSARGS -p $CDBSPATH -o $CDBSOFFSET -s $CDBSSIZE" 
+
+	    if [ "$CDBSISMIRRORED" = "1" ]
+	    then
+		CDBSARGS="$CDBSARGS -m $CDBSMIRRORPATH $CDBSMIRROROFFSET"
+	    fi
+
+	elif [ "$1" = "DBCHUNK" ]
+	then
+
+	    CDBSARGS=" -a $CDBSDBSPACE -p $CDBSPATH -o $CDBSOFFSET -s $CDBSSIZE"
+
+	    if [ "$CDBSISMIRRORED" = "1" ]
+	    then
+
+		CDBSARGS="$CDBSARGS -m $CDBSMIRRORPATH $CDBSMIRROROFFSET"
+	    fi
+	fi
+
+	#
+	# Check that the path name provided exists
+	#
+
+	expr "`ls -Ll $CDBSPATH 2&gt;/dev/null`" : \
+'^[-cl]rw-rw----[ 	][ 	]*[0-9][0-9]*[ 	][	 ]*informix informix' &gt; /dev/null 2&gt;&amp;1
+
+	if [ ! $? -eq 0 ]
+	then
+	    LogMesg INFO "Check file [ $CDBSPATH ] exists and " 
+
+	    LogMesg ERROR "it must be mode 660 and owner informix.informix"
+	    return 1
+	fi
+
+	if [ "$CDBSISMIRRORED" = "1" ] 
+	then
+
+	    expr "`ls -Ll $CDBSMIRRORPATH`" : \
+'^[-cl]rw-rw----[ 	][ 	]*[0-9][0-9]*[ 	][	 ]*informix informix' &gt; /dev/null
+
+	    if [ ! $? -eq 0 ]
+	    then
+
+		LogMesg ERROR "Dbspace path [ $CDBSMIRRORPATH ] must be mode 660 and owner informix.informix"
+		return 1
+	    fi
+	fi
+
+	LogMesg INFO "onspaces $CDBSARGS"
+	echo "Building $CDBSDBSPACE"
+	onspaces $CDBSARGS
+
+    done &lt; /tmp/.crdbs$$
+
+    /bin/rm -f /tmp/.crdbs$$
+
+    return 0
+}
+
+: '
+/*
+ * NAME 	: MakeLogs - construct the Informix Logs
+ *
+ * USAGE	: MakeLogs
+ *
+ * ARGUMENTS	: 
+ *
+ * DESCRIPTION	:This will calculate the correct sizing for the logs
+ *
+ * NOTES	: Bug in that it only deals with one db space. Also 
+ *		  needs major documentation on the function in bc
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+
+MakeLogs()
+{
+    CAMLLOGFILES=`grep "^CONFIG:LOGFILES:" $_EBCONFIGFILE`
+
+    IFS=':'
+    set -- $CAMLLOGFILES
+    IFS="$OIFS"
+
+    CAMLLOGFILES="$3"
+
+    CAMLTOTALLOGSIZE=`grep "^DBLOG:" $_EBCONFIGFILE`
+
+    IFS=':'
+    set -- $CAMLTOTALLOGSIZE
+    IFS="$OIFS"
+
+    CAMLTOTALLOGSIZE="$8"
+    CAMLLOGSPACE="$2"
+
+    #
+    # Now find the size of a log file
+    #
+
+    CAMLLOGSIZE=`grep "^CONFIG:LOGSIZE:" $_EBCONFIGFILE`
+
+    IFS=':'
+    set -- $CAMLLOGSIZE
+    IFS="$OIFS"
+
+    CAMLLOGSIZE="$3"
+
+    #
+    #
+    # This function saves you the trouble of doing the following. This is 
+    # what you have to do manually when you set up Informix log files.
+    #
+    # When Informix allocates a dbspace, it takes the first 53 pages for 
+    # itself.
+    # So if you have a 7000 K dbspace (7MB), when you query using onstat -d 
+    # the free
+    # space, you get 1750 - 53 - ie 1697 pages available 
+    # (this is assuming a 4K page)
+    #
+    # If you want ten logs, this leaves you with 169.7 pages per log - obviously
+    # Informix will not allow you to use partial pages so you are left with 169 
+    # However, 169 is not divisible by the page size - and Informix will 
+    # complain.
+    # Therefore you have to reduce the size by one page and test again to
+    # see if it is divisible by the pages size. It just so happens 168 is. 
+    # This is the figure you have to use if you want all your logs the same size.
+    #
+    # This essentially is what is done in the function f() below using the bc(1)
+    # unix calculator.
+    #
+    # Basically it does the basic iterative maths for you - just pass it the 
+    # parameters: total log space, number of logfiles and the native page size 
+    # and it will return you the size which the log should be.
+    #
+
+    CAMLPAGESIZE="`onstat -b | awk '/.*[0-9][0-9]* buffer size/ { print $8 }'`"
+
+    ( 
+	bc &lt;&lt;!
+
+	scale=0
+
+	define f(t, n, p, r) {
+
+	p /= 1024;
+	t /= p;
+
+	for(r = (t-53)/n; (r % p) != 0; r -= 1) 
+		;
+
+	return(r * p);
+}
+
+	f($CAMLTOTALLOGSIZE, $CAMLLOGFILES, $CAMLPAGESIZE, 0)
+
+!
+    ) &gt; /tmp/.caml$$
+
+    CAMLLOGSIZE="`cat /tmp/.caml$$`"
+    rm -f /tmp/.caml$$
+
+    CAMLCOUNT=$CAMLLOGFILES
+
+    while [ "$CAMLCOUNT" -gt 0 ]
+    do
+	LogMesg INFO "Adding log $CAMLCOUNT"
+	echo "Adding Log $CAMLCOUNT"
+
+	onparams -a -d $CAMLLOGSPACE -s $CAMLLOGSIZE 
+
+	CAMLCOUNT="`expr $CAMLCOUNT - 1`"
+
+    done
+
+    return 0
+}
+
+: '
+/*
+ * NAME 	: BackUpToDevNull - back the informix database
+ *
+ * USAGE	: BackUpToDevNull
+ *
+ * ARGUMENTS	: none
+ *
+ * DESCRIPTION	: Frees the logs
+ *
+ * NOTES	: Would be nice to check if it worked and handle errors properly
+ *
+ * SEE ALSO	:
+ *
+ */
+'
+
+BackUpToDevNull()
+{
+    ontape -s &gt; /dev/null
+}
+
+
+: '
+/*
+ * NAME 	: MoveCheckPoint - move the informix checkpoint into the new logs
+ *
+ * USAGE	: MoveCheckPoint 
+ *
+ * ARGUMENTS	: none
+ *
+ * DESCRIPTION	: When online is iniitialted, the three initial logs are held
+ *		  in root dbs - we need to move the current check point to
+ *		  the newly created log files
+ *
+ * NOTES	: Error checking would be nice 
+ *
+ * SEE ALSO	: onmode
+ *
+ */
+'
+
+MoveCheckPoint()
+{
+	onmode -cl; onmode -cl; onmode -cl
+}
+
+: '
+/*
+ * NAME 	: DropRootLogs	- Drop the logs in rootdbs
+ *
+ * USAGE	: DropRootLogs
+ *
+ * ARGUMENTS	: none
+ *
+ * DESCRIPTION	: Drops the initial logfiles held in the rootdbs
+ *
+ * NOTES	: Pretty noddy really - should really do error checking
+ *
+ * SEE ALSO	: onparams
+ *
+ */
+'
+
+DropRootLogs()
+{
+    for i in 1 2 3
+    do
+	onparams -d -l $i -y
+    done
+}
+
+: '
+/*
+ * NAME 	: ChangeOnlineMode - is the current engine running in &lt;mode&gt;?
+ *
+ * USAGE	: ChangeOnlineMode &lt;mode&gt;
+ *
+ * ARGUMENTS	: &lt;mode&gt; -  [ SINGLEUSER | MULTIUSER ]  
+ *
+ * DESCRIPTION	: ChangeOnlineMode changes the mode of online
+ *
+ * NOTES	: This function really should check what state online is in
+ *
+ * SEE ALSO	: onmode
+ *
+ */
+'
+
+ChangeOnlineMode()
+{
+    case "$1" in
+    S*)
+	SUPLARG="-sy"
+	GREP="Qui"
+	;;
+    M*)
+	SUPLARG="-m"
+	GREP="Up"
+	;;
+    *) return 1
+    esac
+
+    $INFORMIXDIR/bin/onmode $SUPLARG ; sleep 3
+
+    while :
+    do
+	onstat - | grep $GREP
+
+	if [ $? = 0 ]
+	then
+	    break
+	fi
+	sleep 1
+    done
+
+    return 0
+}
+
+
+#
+# Pass the config file parameter
+#
+
+if [ "$1" = "-c" ]
+then
+    OUTPUT=${2-envbuild.cfg}
+    LogMesg INFO "Creating Configuration file [ $OUTPUT ] for $INFORMIXSERVER"
+    CreateInputFile &gt; $OUTPUT 
+    exit 0
+fi
+
+LogMesg INFO "Setting up a default onconfig file from onconfig.std"
+    CopyOnconfigFile "$1"
+
+LogMesg INFO "Building the rootdbs db space"
+    if BuildRootDbspace
+    then
+	    :
+    else
+	    exit 1
+    fi
+
+LogMesg INFO "Creating all dbspaces"
+    if CreateDbSpaces $_EBCONFIGFILE
+    then
+	LogMesg INFO "All devices created successfully"
+    else
+	LogMesg ERROR "Exiting Due to error creating devices"
+	exit 1
+    fi
+
+LogMesg INFO "Waiting 2 minutes for Online to build the sysmaster database"
+    sleep 120 
+
+LogMesg INFO "Switching Online to single user mode"
+    ChangeOnlineMode SINGLEUSER
+
+LogMesg INFO "Creating Online logical logs"
+    MakeLogs
+
+LogMesg INFO "Switching to Multi-user operation"
+    ChangeOnlineMode MULTIUSER
+
+LogMesg INFO "Running a system backup to Free newly created logs"
+    BackUpToDevNull
+
+LogMesg INFO "Moving Current Checkpoint to new logs"
+    MoveCheckPoint
+
+LogMesg "Freeing default logs in rootdbs"
+
+    BackUpToDevNull
+
+LogMesg INFO "Switching to Single-user mode state"
+    ChangeOnlineMode SINGLEUSER
+
+LogMesg INFO "Dropping root logs"
+    DropRootLogs
+
+LogMesg INFO "Shutting down online to reconfigure for live running"
+    ShutDownOnline -s
+
+LogMesg INFO "Altering $_EBCONFIGFILE"
+    SetOnconfigFile $_EBCONFIGFILE
+
+LogMesg INFO "Starting Configured Online Installation"
+    oninit 2&gt;/dev/null 1&gt;/dev/null 
+
+LogMesg INFO "Program completed successfully"
+
+exit 0

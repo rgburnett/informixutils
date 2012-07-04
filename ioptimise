@@ -1,0 +1,497 @@
+#!/bin/sh
+
+: '{{ TOOLDOC 1
+/*
+ * NAME 	: ioptimise - optimise an Informix database
+ *
+ * USAGE	: ioptimise [ <database> | <database> ... ]
+ *
+ * ARGUMENTS	: <database> - name of a target database. 
+ *
+ * DESCRIPTION	: ioptimise optimises an Informix database.
+ *
+ * OPTIONS	: none
+ *
+ * NOTES	: none 
+ *
+ * PERMS	: 555
+ *
+ * STATUS	: SUPPORTED
+ *
+ * SEE ALSO	: OptimiseWholeDatabase 
+ *
+ * SCCS ID	: @(#)ioptimise	1.7 
+ *
+ * DATED	: 96/07/23 14:22:48 
+ *
+ * CONTINUUS	: %version	: 1%
+ *
+ */
+'
+
+: '
+/*
+ * 
+ * NAME 	: OptimiseWholeDatabase
+ *
+ * DESCRIPTION	: Collects statistics for the whole database in an optimal way
+ *                Reference Guide to 7.1 feature Enhancements
+ *
+ * PARAMETERS	: database
+ *
+ * NOTES	: this procedure has three parts to collecting the stats
+ * 		  collect medium stats for the whole datasbase but ignore index 
+ *		  distributions
+ */'
+
+
+OptimiseWholeDatabase()
+{
+    echo "UPDATE STATISTICS MEDIUM DISTRIBUTIONS ONLY" | dbaccess "$1" >/dev/null 2>&1
+
+
+    #  collect high stats for all first columns in indexes
+    #  first create a script with the first sql statement
+    #  then edit out the junk with sed
+    #  then run the script
+
+    (
+
+	cat <<! 
+
+	    SELECT
+		'UPDATE STATISTICS HIGH FOR TABLE ',
+		tabname,
+		'(',
+		colname,
+		');' 
+	    FROM
+		systables a,
+		syscolumns b,
+		sysindexes c
+	    WHERE
+		c.tabid > 99 
+	    AND c.part1 = b.colno 
+	    AND c.tabid = b.tabid
+	    AND b.tabid = a.tabid
+	    ORDER BY
+		tabname;
+!
+
+    ) | dbaccess "$1" 2>/dev/null | sed 's/.*[ ][ ]//' | dbaccess "$1" > /dev/null 2>&1
+
+    # similarly for this next script which collects stats for all indexed
+    # columns that are never the first column in an index 
+    #  i.e. ones that are not selected above
+
+    (
+	dbaccess "$1" <<!
+
+	    SELECT DISTINCT 
+		'UPDATE STATISTICS LOW FOR TABLE ',
+	        tabname,
+		'(',
+		colname,
+		');' 
+	    FROM
+		systables a, 
+		syscolumns b, 
+		sysindexes c 
+	    WHERE
+		c.part2 NOT IN (
+		    SELECT 
+			d.part1 
+		    FROM 
+			sysindexes d 
+		    WHERE 
+			c.tabid = d.tabid
+		) 
+	    AND c.part2 = b.colno 
+	    AND c.part2 > 0 
+	    AND c.tabid > 99 
+	    AND c.tabid = b.tabid 
+	    AND b.tabid = a.tabid
+
+	    UNION
+
+	    SELECT DISTINCT
+		'UPDATE STATISTICS LOW FOR TABLE ',
+		tabname,
+		'(',
+		colname,
+		');' 
+	    FROM
+		systables a, 
+		syscolumns b, 
+		sysindexes c 
+	    WHERE
+		c.part3 NOT IN (
+		    SELECT 
+			d.part1 
+		    FROM 
+			sysindexes d 
+		    WHERE
+			c.tabid = d.tabid
+		) 
+	    AND c.part3 = b.colno 
+	    AND c.part3 > 0 
+	    AND c.tabid > 99 
+	    AND c.tabid = b.tabid 
+	    AND b.tabid = a.tabid
+
+	    UNION
+
+	    SELECT DISTINCT 
+		'UPDATE STATISTICS LOW FOR TABLE ',
+		tabname,
+		'(',
+		colname,
+		');' 
+	    FROM
+		systables a, 
+		syscolumns b, 
+		sysindexes c 
+	    WHERE
+		c.part4 NOT IN (
+		    SELECT 
+			d.part1 
+		    FROM 
+			sysindexes d 
+		    WHERE 
+			c.tabid = d.tabid
+		) 
+	    AND c.part4 = b.colno 
+	    AND c.part4 > 0 
+	    AND c.tabid > 99 
+	    AND c.tabid = b.tabid 
+	    AND b.tabid = a.tabid
+
+	    UNION
+
+	    SELECT DISTINCT
+		'UPDATE STATISTICS LOW FOR TABLE ',
+		tabname,
+		'(',
+		colname,
+		');' 
+	    FROM
+		systables a,
+		syscolumns b, 
+		sysindexes c
+	    WHERE
+		c.part5 NOT IN (
+		    SELECT 
+			d.part1 
+		    FROM 
+			sysindexes d 
+		    WHERE 
+			c.tabid = d.tabid
+		) 
+	    AND c.part5 = b.colno 
+	    AND c.part5 > 0 
+	    AND c.tabid > 99 
+	    AND c.tabid = b.tabid 
+	    AND b.tabid = a.tabid
+
+	    UNION
+
+	    SELECT DISTINCT 
+		'UPDATE STATISTICS LOW FOR TABLE ',
+		tabname,
+		'(',
+		colname,
+		');' 
+	    FROM
+		systables a,
+		syscolumns b,
+		sysindexes c 
+	    WHERE
+		c.part6 NOT IN (
+		SELECT 
+		    d.part1 
+		FROM
+		    sysindexes d 
+		WHERE 
+		    c.tabid = d.tabid
+		) 
+	    AND c.part6 = b.colno 
+	    AND c.part6 > 0 
+	    AND c.tabid > 99 
+	    AND c.tabid = b.tabid
+	    AND b.tabid = a.tabid
+
+	    UNION
+
+	    SELECT DISTINCT 
+		'UPDATE STATISTICS LOW FOR TABLE ',
+		tabname,
+		'(',
+		colname,
+		');' 
+	    FROM
+		systables a, 
+		syscolumns b,
+		sysindexes c
+	    WHERE
+		c.part7 NOT IN (
+		    SELECT
+			d.part1 
+		    FROM
+			sysindexes d 
+		    WHERE
+			c.tabid = d.tabid
+		)
+	    AND c.part7 = b.colno 
+	    AND c.part7 > 0
+	    AND c.tabid > 99
+	    AND c.tabid = b.tabid 
+	    AND b.tabid = a.tabid
+
+	    UNION
+
+	    SELECT DISTINCT
+		'UPDATE STATISTICS LOW FOR TABLE ',
+		tabname,
+		'(',
+		colname,
+		');' 
+	    FROM
+		systables a,
+		syscolumns b,
+		sysindexes c 
+	    WHERE
+		c.part8 NOT IN (
+		SELECT 
+		    d.part1
+		FROM
+		    sysindexes d 
+		WHERE 
+		    c.tabid = d.tabid
+		) 
+	    AND c.part8 = b.colno 
+	    AND c.part8 > 0 
+	    AND c.tabid > 99
+	    AND c.tabid = b.tabid 
+	    AND b.tabid = a.tabid
+
+	    UNION
+
+	    SELECT DISTINCT
+		'UPDATE STATISTICS LOW FOR TABLE ',
+		tabname,
+		'(',
+		colname,
+		');' 
+	    FROM
+		systables a,
+		syscolumns b,
+		sysindexes c 
+	    WHERE
+		c.part9 NOT IN (
+		    SELECT
+			d.part1 
+		    FROM
+			sysindexes d 
+		    WHERE
+			c.tabid = d.tabid
+		) 
+	    AND c.part9 = b.colno 
+	    AND c.part9 > 0 
+	    AND c.tabid > 99 
+	    AND c.tabid = b.tabid 
+	    AND b.tabid = a.tabid
+
+	    UNION
+
+	    SELECT DISTINCT
+		'UPDATE STATISTICS LOW FOR TABLE ',
+		tabname,
+		'(',
+		colname,
+		');'
+	    FROM
+		systables a, 
+		syscolumns b,
+		sysindexes c
+	    WHERE
+		c.part10 NOT IN (
+		    SELECT 
+			d.part1 
+		    FROM 
+			sysindexes d 
+		    WHERE 
+			c.tabid = d.tabid
+		) 
+	    AND c.part10 = b.colno 
+	    AND c.part10 > 0
+	    AND c.tabid > 99 
+	    AND c.tabid = b.tabid 
+	    AND b.tabid=a.tabid
+
+	    UNION
+
+	    SELECT DISTINCT
+		'UPDATE STATISTICS LOW FOR TABLE ',
+		tabname,
+		'(',
+		colname,
+		');'
+	    FROM
+		systables a,
+		syscolumns b,
+		sysindexes c
+	    WHERE
+		c.part11 NOT IN (
+		    SELECT
+			d.part1
+		    FROM
+			sysindexes d 
+		    WHERE
+			c.tabid = d.tabid
+		) 
+	    AND c.part11 = b.colno 
+	    AND c.part11 > 0 
+	    AND c.tabid > 99
+	    AND c.tabid = b.tabid 
+	    AND b.tabid = a.tabid
+
+	    UNION
+
+	    SELECT DISTINCT 
+		'UPDATE STATISTICS LOW FOR TABLE ',
+		tabname,
+		'(',
+		colname,
+		');' 
+	    FROM
+		systables a, 
+		syscolumns b, 
+		sysindexes c 
+	    WHERE
+		c.part12 NOT IN (
+		    SELECT
+			d.part1 
+		    FROM 
+			sysindexes d 
+		    WHERE
+			c.tabid = d.tabid
+		) 
+	    AND c.part12 = b.colno 
+	    AND c.part12 > 0 
+	    AND c.tabid > 99
+	    AND c.tabid = b.tabid
+	    AND b.tabid = a.tabid
+
+	    UNION
+	    SELECT DISTINCT
+		'UPDATE STATISTICS LOW FOR TABLE ',
+		tabname,
+		'(',
+		colname,
+		');' 
+	    FROM
+		systables a,
+		syscolumns b,
+		sysindexes c 
+	    WHERE
+		c.part13 NOT IN (
+		    SELECT
+			d.part1 
+		    FROM
+			sysindexes d 
+		    WHERE 
+			c.tabid = d.tabid
+		)
+	    AND c.part13 = b.colno 
+	    AND c.part13 > 0 
+	    AND c.tabid > 99 
+	    AND c.tabid = b.tabid 
+	    AND b.tabid = a.tabid
+	   
+	    UNION
+
+	    SELECT DISTINCT
+		'UPDATE STATISTICS LOW FOR TABLE ',
+		tabname,
+		'(',
+		colname,
+		');'
+	    FROM
+		systables a,
+		syscolumns b,
+		sysindexes c 
+	    WHERE
+		c.part14 NOT IN (
+		    SELECT
+			d.part1
+		    FROM 
+			sysindexes d 
+		    WHERE
+			c.tabid = d.tabid
+		)
+	    AND c.part14 = b.colno
+	    AND c.part14 > 0
+	    AND c.tabid > 99
+	    AND c.tabid = b.tabid
+	    AND b.tabid = a.tabid
+
+	    UNION
+
+	    SELECT DISTINCT
+		'UPDATE STATISTICS LOW FOR TABLE ',
+		tabname,
+		'(',
+		colname,
+		');'
+	    FROM
+		systables a, 
+		syscolumns b,
+		sysindexes c 
+	    WHERE
+		c.part15 NOT IN (
+		    SELECT 
+			d.part1 
+		    FROM 
+			sysindexes d 
+		    WHERE 
+			c.tabid = d.tabid
+		) 
+	    AND c.part15 = b.colno 
+	    AND c.part15 > 0 
+	    AND c.tabid > 99
+	    AND c.tabid = b.tabid
+	    AND b.tabid = a.tabid
+
+	    UNION
+
+	    SELECT DISTINCT
+		'UPDATE STATISTICS LOW FOR TABLE ',
+		tabname,
+		'(',
+		colname,
+		');' 
+	    FROM
+		systables a, 
+		syscolumns b, 
+		sysindexes c 
+	    WHERE
+		c.part16 NOT IN (
+		    SELECT
+			d.part1
+		    FROM 
+			sysindexes d 
+		    WHERE 
+			c.tabid = d.tabid
+		)
+	    AND c.part16 = b.colno 
+	    and c.part16 > 0 
+	    and c.tabid > 99 
+	    and c.tabid = b.tabid 
+	    and b.tabid = a.tabid
+!
+    ) 2>/dev/null | sed 's/.*[ ][ ]//' | dbaccess "$1" > /dev/null 2>&1
+}
+
+OptimiseWholeDatabase $1
+
+exit 0

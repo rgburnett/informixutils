@@ -1,0 +1,78 @@
+#!/bin/sh
+
+: '{{ TOOLDOC 1
+/*
+ * Name 	: ireduce - reduce the dbspace size by a percentage on a 16MB boundary
+ *
+ * Usage	: ireduce [ -b <boundary> ] <percent> <envbuild.cfg file> 
+ *
+ * Arguments	: -b - This is by default, 16MB but can be set to reflect the
+ *		       physical partition size of the logical volume manager.
+ *
+ *		  <percent>	- a percentage reduction or increase to the
+ *				  dbspaces. 
+ *
+ *		  <envbuild.cfg> - an envbuild(1DB) config file.
+ *
+ * Description	: ireduce shrinks or grows an envbuild configuration file by 
+ *		  a requested percentage.
+ *
+ * Notes	: No dbspace can occupy less than 16MB 
+ *
+ * Status	: INTERNAL DB TEAM USE ONLY
+ *
+ * See also	: envbuild(1DB) 
+ *
+ * Sccs 	: @(#)ireduce	1.2
+ *
+ * Dated	: 96/07/23 14:22:48 
+ *
+ * Continuus
+ * 
+ * Type		: %cvtype: %
+ * Created by	: %created_by: %
+ * Date Created	: %date_created: %
+ * Date Modified: %date_modified: %
+ * Derived by	: %derived_by: %
+ * File/Version	: %filespec: %
+ *
+ */
+'
+
+if [ $1 = "-b" ]
+then
+    :
+fi
+
+PERCENT=${1:-10}
+
+awk -F: ' BEGIN { 
+	total = 0; 
+	newtotal = 0;
+} 
+{
+    if( $2 ~ /^rootdbs/ || $2 ~ /^dbdbs/ || $2 ~ /^logspace/ )
+    {
+	print $0
+	continue
+    }
+
+   total += $2
+
+   newsize = $2 - ($2 * ( '"$PERCENT"' / 100 ));
+
+   if (newsize % 4096)
+	newsize += 4;
+
+   if(newsize < 16384)
+	newsize = 16384; 
+
+   newtotal += newsize;
+
+   printf("%s:%d\n", $1, newsize);
+
+} END { 
+	printf("Original %d K New %d Percentage %d\n",
+		total, newtotal, (newtotal/total * 100)) }' $1
+
+exit 0

@@ -1,0 +1,57 @@
+#!/bin/sh
+
+: '{{ TOOLDOC 1
+/*
+ * NAME 	: idf - informix disk space
+ *
+ * USAGE	: idf
+ *
+ * ARGUMENTS	: none 
+ *
+ * DESCRIPTION	: idf selects from the current instance of Informix system 
+ *		  catalogues to produce a listing dbspace utilisation.
+ *
+ * OPTIONS	: none 
+ *
+ * NOTES	: Specifics 
+ *
+ * PERMS	: 555
+ *
+ * STATUS	: NOT SUPPORTED
+ *
+ * SEE ALSO	: enter other commands of relevance 
+ *
+ * SCCS ID	: @(#)idf	1.7
+ *
+ * DATED	: 96/07/23 14:22:47 
+ *
+ * CONTINUUS	: %version	: 1%
+ *
+ */
+'
+
+
+(
+$INFORMIXDIR/bin/dbaccess sysmaster <<!
+select 
+    d.name, 
+    sum(s.chksize), 
+    ((( sum(s.chksize) - sum(s.nfree)) / sum(s.chksize)) * 100) 
+from 
+    syschunks s, 
+    sysdbspaces d 
+where
+    d.dbsnum = s.dbsnum group by d.name order by d.name;
+
+!
+) 2> /dev/null | /bin/sed -e '/Database/d' \
+    -e '/^$/d' \
+    -e '/^name.*expre.*/d' | awk 'BEGIN { 
+        printf("DB                    Total       Total Used       Occupied\n")
+        printf("Space                 Pages        MB   %%            MB\n")
+	printf("-------------------------------------------------------\n") 
+    }
+    { 
+	printf("%-18.20s   %6.0d  %6dMB  %02.2f    %05.2fMB\n", $1, $2, 
+	(($2 * 4)/1000), $3, (((($2 * 4)/1000)) * $3) / 100 ) }'
+exit 0
